@@ -254,25 +254,28 @@ describe('clipboardHistoryStore', () => {
     expect(clipboardHistoryStore.searchResults?.[0].favorite).toBe(true);
   });
 
-  it('renameHistoryItem normalizes title, updates loaded lists, and notifies subscribers', async () => {
+  it('renameHistoryItem passes raw title to Rust, updates loaded lists with Rust normalized title, and notifies subscribers', async () => {
     mockListInitial.mockResolvedValue({
       favorites: [{ id: 'f1', type: 'text', createdAt: 100, favorite: true }],
       recent: [{ id: 'r1', type: 'text', createdAt: 50, favorite: false }],
       nextCursor: undefined,
     });
-    mockRename.mockResolvedValue(undefined);
+    mockRename.mockResolvedValueOnce('Custom Name');
     await clipboardHistoryStore.loadInitial(10);
 
     const events: any[] = [];
     const unsub = clipboardHistoryStore.subscribe((e) => events.push(e));
 
-    await clipboardHistoryStore.renameHistoryItem('r1', '  Custom Name  ');
-    expect(mockRename).toHaveBeenCalledWith('r1', 'Custom Name');
+    const res = await clipboardHistoryStore.renameHistoryItem('r1', '  Custom Name  ');
+    expect(mockRename).toHaveBeenCalledWith('r1', '  Custom Name  ');
+    expect(res).toBe('Custom Name');
     expect(clipboardHistoryStore.recent[0].title).toBe('Custom Name');
     expect(events).toEqual([{ type: 'upsert', itemId: 'r1' }]);
 
-    await clipboardHistoryStore.renameHistoryItem('r1', '   ');
-    expect(mockRename).toHaveBeenCalledWith('r1', null);
+    mockRename.mockResolvedValueOnce(null);
+    const resCleared = await clipboardHistoryStore.renameHistoryItem('r1', '   ');
+    expect(mockRename).toHaveBeenCalledWith('r1', '   ');
+    expect(resCleared).toBeUndefined();
     expect(clipboardHistoryStore.recent[0].title).toBeUndefined();
     unsub();
   });

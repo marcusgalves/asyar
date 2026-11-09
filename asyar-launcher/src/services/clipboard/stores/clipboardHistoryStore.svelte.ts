@@ -190,16 +190,15 @@ export class ClipboardHistoryStoreClass {
     this.#notify({ type: 'upsert', itemId: id });
   }
 
-  async renameHistoryItem(id: string, title: string | null): Promise<void> {
-    const trimmed = title?.trim() ?? '';
-    const normalized = trimmed.length > 0 ? Array.from(trimmed).slice(0, 200).join('') : undefined;
-    await clipboardRenameItem(id, normalized ?? null);
+  async renameHistoryItem(id: string, title: string | null): Promise<string | undefined> {
+    const storedTitle = await clipboardRenameItem(id, title);
+    const nextTitle = storedTitle ?? undefined;
 
     const updateTitle = (item: ListItem): ListItem => {
       if (item.id !== id) return item;
       const copy: ListItem = { ...item };
-      if (normalized !== undefined) {
-        copy.title = normalized;
+      if (nextTitle !== undefined) {
+        copy.title = nextTitle;
       } else {
         delete copy.title;
       }
@@ -212,6 +211,7 @@ export class ClipboardHistoryStoreClass {
       this.searchResults = this.searchResults.map(updateTitle);
     }
     this.#notify({ type: 'upsert', itemId: id });
+    return nextTitle;
   }
 
   async deleteHistoryItem(id: string): Promise<ClipboardDeleteResult> {

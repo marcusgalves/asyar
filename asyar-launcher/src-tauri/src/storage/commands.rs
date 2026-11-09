@@ -140,7 +140,7 @@ pub fn clipboard_record_capture(
 /// item was stored; expired non-favorites are skipped.
 #[tauri::command]
 pub async fn clipboard_apply_synced(
-    item: super::clipboard::ClipboardItem,
+    item: super::clipboard::SyncedClipboardItem,
     retention_ms: Option<f64>,
     store: State<'_, DataStore>,
     keystore: State<'_, KeystoreState>,
@@ -202,7 +202,7 @@ pub fn clipboard_rename_item(
     store: State<'_, DataStore>,
     keystore: State<'_, KeystoreState>,
     fts: State<'_, Arc<ClipboardFts>>,
-) -> Result<(), AppError> {
+) -> Result<Option<String>, AppError> {
     let conn = store.conn()?;
     Ok(super::clipboard::rename_item_with_fts(
         &conn,

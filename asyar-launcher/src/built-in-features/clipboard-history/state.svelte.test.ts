@@ -982,18 +982,23 @@ describe('getClipboardItemTitle and renameItem', () => {
     expect(state.renamingItem).toBeNull();
   });
 
-  it('renames an item, updates state.items, and clears on empty input', async () => {
+  it('renames an item by passing raw input to the store, updates state.items, and clears on empty input', async () => {
+    vi.mocked(clipboardHistoryStore.renameHistoryItem).mockResolvedValueOnce('Production Token');
     state.openRenameDialog(state.items[0]);
     const ok = await state.renameItem('1', '  Production Token  ');
     expect(ok).toBe(true);
-    expect(clipboardHistoryStore.renameHistoryItem).toHaveBeenCalledWith('1', 'Production Token');
+    expect(clipboardHistoryStore.renameHistoryItem).toHaveBeenCalledWith(
+      '1',
+      '  Production Token  ',
+    );
     expect(state.items.find((i) => i.id === '1')?.title).toBe('Production Token');
     expect(state.renamingItem).toBeNull();
 
     // Resetting with empty string clears the custom title
+    vi.mocked(clipboardHistoryStore.renameHistoryItem).mockResolvedValueOnce(undefined);
     const okReset = await state.renameItem('1', '   ');
     expect(okReset).toBe(true);
-    expect(clipboardHistoryStore.renameHistoryItem).toHaveBeenCalledWith('1', null);
+    expect(clipboardHistoryStore.renameHistoryItem).toHaveBeenCalledWith('1', '   ');
     expect(state.items.find((i) => i.id === '1')?.title).toBeUndefined();
   });
 });

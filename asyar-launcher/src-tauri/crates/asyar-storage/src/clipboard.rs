@@ -111,12 +111,87 @@ pub struct ClipboardCount {
     pub favorites: u32,
 }
 
-/// Return type for [`export_for_sync`]: a page of full `ClipboardItem`
+mod double_option {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+    where
+        T: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        Option::<T>::deserialize(deserializer).map(Some)
+    }
+
+    pub fn serialize<T, S>(value: &Option<Option<T>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        T: Serialize,
+        S: Serializer,
+    {
+        match value {
+            None | Some(None) => serializer.serialize_none(),
+            Some(Some(v)) => v.serialize(serializer),
+        }
+    }
+}
+
+/// Sync payload representation of a clipboard item.
+///
+/// Uses a tri-state `title` (`Option<Option<String>>`) on the sync wire:
+/// - [`export_for_sync`] always sets `title = Some(item.title)`, so a cleared
+///   or unset title serializes as explicit `"title": null` in JSON.
+/// - [`apply_synced_item`] treats `None` (field absent in JSON from older
+///   clients) as "keep existing local title", `Some(None)` (explicit `"title":
+///   null` in JSON) as "clear local title", and `Some(Some(s))` as "set/update
+///   local title".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncedClipboardItem {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub item_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "double_option"
+    )]
+    pub title: Option<Option<String>>,
+    pub created_at: f64,
+    pub favorite: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_app: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redacted_kinds: Option<Vec<String>>,
+}
+
+impl From<ClipboardItem> for SyncedClipboardItem {
+    fn from(item: ClipboardItem) -> Self {
+        Self {
+            id: item.id,
+            item_type: item.item_type,
+            content: item.content,
+            preview: item.preview,
+            title: Some(item.title),
+            created_at: item.created_at,
+            favorite: item.favorite,
+            metadata: item.metadata,
+            source_app: item.source_app,
+            redacted_kinds: item.redacted_kinds,
+        }
+    }
+}
+
+/// Return type for [`export_for_sync`]: a page of full [`SyncedClipboardItem`]
 /// rows (content decrypted) plus an optional cursor for the next page.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportPage {
-    pub items: Vec<ClipboardItem>,
+    pub items: Vec<SyncedClipboardItem>,
     pub next_cursor: Option<Cursor>,
 }
 
@@ -301,12 +376,31 @@ pub fn normalize_title(raw: Option<&str>) -> Option<String> {
     Some(trimmed.chars().take(MAX_TITLE_CHARS).collect())
 }
 
+enum TitlePolicy<'a> {
+    KeepIfNone(Option<&'a str>),
+    Explicit(Option<&'a str>),
+}
+
 /// Insert or replace a clipboard item (upsert by id). The `content`,
 /// `preview`, and `title` columns are encrypted under `master_key` before
 /// insertion; every other column stays plaintext so SQL filters and sorts work.
 pub fn add_item(
     conn: &Connection,
     item: &ClipboardItem,
+    master_key: &[u8; 32],
+) -> Result<(), AppError> {
+    upsert_item_with_title_policy(
+        conn,
+        item,
+        TitlePolicy::KeepIfNone(item.title.as_deref()),
+        master_key,
+    )
+}
+
+fn upsert_item_with_title_policy(
+    conn: &Connection,
+    item: &ClipboardItem,
+    title_policy: TitlePolicy<'_>,
     master_key: &[u8; 32],
 ) -> Result<(), AppError> {
     // If an existing row exists, and incoming content/preview/title is None or empty,
@@ -340,10 +434,15 @@ pub fn add_item(
         Some(p) if !p.is_empty() => encrypt_opt(Some(p), master_key)?,
         _ => existing.as_ref().and_then(|e| e.preview.clone()),
     };
-    let normalized_title = normalize_title(item.title.as_deref());
-    let encrypted_title = match normalized_title.as_deref() {
-        Some(t) => encrypt_opt(Some(t), master_key)?,
-        None => existing.as_ref().and_then(|e| e.title.clone()),
+    let encrypted_title = match title_policy {
+        TitlePolicy::KeepIfNone(raw) => match normalize_title(raw) {
+            Some(t) => encrypt_opt(Some(&t), master_key)?,
+            None => existing.as_ref().and_then(|e| e.title.clone()),
+        },
+        TitlePolicy::Explicit(raw) => {
+            let normalized = normalize_title(raw);
+            encrypt_opt(normalized.as_deref(), master_key)?
+        }
     };
     let content_hash = if item
         .content
@@ -631,7 +730,7 @@ pub fn export_for_sync(
     };
 
     Ok(ExportPage {
-        items: probe,
+        items: probe.into_iter().map(SyncedClipboardItem::from).collect(),
         next_cursor,
     })
 }
@@ -743,12 +842,13 @@ pub fn toggle_favorite(conn: &Connection, id: &str) -> Result<bool, AppError> {
 /// Whitespace is trimmed; an empty or whitespace-only string becomes `None`
 /// (stored as SQL `NULL`, clearing the custom title). Titles longer than
 /// [`MAX_TITLE_CHARS`] characters are truncated on a UTF-8 char boundary.
+/// Returns the normalized title (`Some(trimmed)` or `None`).
 pub fn rename_item(
     conn: &Connection,
     id: &str,
     title: Option<String>,
     master_key: &[u8; 32],
-) -> Result<(), AppError> {
+) -> Result<Option<String>, AppError> {
     let normalized = normalize_title(title.as_deref());
     let encrypted_title = encrypt_opt(normalized.as_deref(), master_key)?;
     conn.execute(
@@ -756,19 +856,20 @@ pub fn rename_item(
         params![encrypted_title, id],
     )
     .map_err(|e| AppError::Database(format!("Failed to rename clipboard item: {e}")))?;
-    Ok(())
+    Ok(normalized)
 }
 
 /// FTS-aware wrapper for [`rename_item`]: updates the encrypted `title` column
-/// in SQLite and re-indexes the item in [`ClipboardFts`].
+/// in SQLite, re-indexes the item in [`ClipboardFts`], and returns the
+/// normalized title (`Some(trimmed)` or `None`).
 pub fn rename_item_with_fts(
     conn: &Connection,
     id: &str,
     title: Option<String>,
     master_key: &[u8; 32],
     fts: &ClipboardFts,
-) -> Result<(), AppError> {
-    rename_item(conn, id, title, master_key)?;
+) -> Result<Option<String>, AppError> {
+    let normalized = rename_item(conn, id, title, master_key)?;
     if let Some(item) = get_item(conn, id, master_key)? {
         fts.upsert(
             &item.id,
@@ -777,7 +878,7 @@ pub fn rename_item_with_fts(
             item.content.as_deref(),
         )?;
     }
-    Ok(())
+    Ok(normalized)
 }
 
 /// Tombstone the item in the cloud-sync journal then hard-delete it from
@@ -1163,7 +1264,7 @@ pub fn record_capture_with_fts(
 /// than inserted, since the next local capture would evict and tombstone it.
 pub fn apply_synced_item(
     conn: &Connection,
-    item: &ClipboardItem,
+    item: &SyncedClipboardItem,
     master_key: &[u8; 32],
     retention_ms: Option<f64>,
 ) -> Result<bool, AppError> {
@@ -1171,14 +1272,30 @@ pub fn apply_synced_item(
     if !item.favorite && item.created_at < js_sys_now() - age_ms {
         return Ok(false);
     }
-    add_item(conn, item, master_key)?;
+    let title_policy = match &item.title {
+        None => TitlePolicy::KeepIfNone(None),
+        Some(explicit) => TitlePolicy::Explicit(explicit.as_deref()),
+    };
+    let base = ClipboardItem {
+        id: item.id.clone(),
+        item_type: item.item_type.clone(),
+        content: item.content.clone(),
+        preview: item.preview.clone(),
+        title: item.title.clone().flatten(),
+        created_at: item.created_at,
+        favorite: item.favorite,
+        metadata: item.metadata.clone(),
+        source_app: item.source_app.clone(),
+        redacted_kinds: item.redacted_kinds.clone(),
+    };
+    upsert_item_with_title_policy(conn, &base, title_policy, master_key)?;
     Ok(true)
 }
 
 /// FTS-aware wrapper for [`apply_synced_item`].
 pub fn apply_synced_item_with_fts(
     conn: &Connection,
-    item: &ClipboardItem,
+    item: &SyncedClipboardItem,
     master_key: &[u8; 32],
     fts: &ClipboardFts,
     retention_ms: Option<f64>,
@@ -1273,8 +1390,8 @@ mod tests {
         a.created_at = now - 1000.0;
         b.created_at = now - 500.0;
 
-        assert!(apply_synced_item(&conn, &a, &key, None).unwrap());
-        assert!(apply_synced_item(&conn, &b, &key, None).unwrap());
+        assert!(apply_synced_item(&conn, &a.into(), &key, None).unwrap());
+        assert!(apply_synced_item(&conn, &b.into(), &key, None).unwrap());
 
         assert_eq!(row_count(&conn), 2, "both pulled items must survive");
         assert_eq!(tombstone_count(&conn), 0, "a pull must never tombstone");
@@ -1295,7 +1412,7 @@ mod tests {
         fresh.created_at = now - 1000.0;
 
         let retention_30d = Some(30.0 * 86_400_000.0);
-        assert!(apply_synced_item(&conn, &fresh, &key, retention_30d).unwrap());
+        assert!(apply_synced_item(&conn, &fresh.into(), &key, retention_30d).unwrap());
 
         assert_eq!(row_count(&conn), 2);
         assert_eq!(tombstone_count(&conn), 0);
@@ -1314,8 +1431,8 @@ mod tests {
         let mut expired_fav = make_item("2", "expired favorite", true);
         expired_fav.created_at = now - 40.0 * 86_400_000.0;
 
-        assert!(!apply_synced_item(&conn, &expired, &key, retention_30d).unwrap());
-        assert!(apply_synced_item(&conn, &expired_fav, &key, retention_30d).unwrap());
+        assert!(!apply_synced_item(&conn, &expired.into(), &key, retention_30d).unwrap());
+        assert!(apply_synced_item(&conn, &expired_fav.into(), &key, retention_30d).unwrap());
 
         assert_eq!(row_count(&conn), 1);
         assert_eq!(tombstone_count(&conn), 0);
@@ -2844,25 +2961,28 @@ mod tests {
     }
 
     #[test]
-    fn sync_export_and_apply_preserve_title_across_older_client_payloads() {
-        let (conn, fts) = setup_with_fts();
+    fn sync_export_and_apply_preserve_title_on_absent_field_and_clear_on_explicit_null() {
+        let (conn_a, fts_a) = setup_with_fts();
+        let (conn_b, fts_b) = setup_with_fts();
         let key = test_key();
 
         let mut item = make_item("sync-1", "secret-token-value", false);
         item.preview = Some("secret-token-value".into());
         item.title = Some("GitHub Personal Token".into());
-        apply_synced_item_with_fts(&conn, &item, &key, &fts, None).unwrap();
+        let sync_item: SyncedClipboardItem = item.into();
+        apply_synced_item_with_fts(&conn_a, &sync_item, &key, &fts_a, None).unwrap();
+        apply_synced_item_with_fts(&conn_b, &sync_item, &key, &fts_b, None).unwrap();
 
-        // export_for_sync must include the custom title
-        let exported = export_for_sync(&conn, None, 10, &key).unwrap();
+        // export_for_sync on device A must emit the custom title
+        let exported = export_for_sync(&conn_a, None, 10, &key).unwrap();
         assert_eq!(exported.items.len(), 1);
         assert_eq!(
-            exported.items[0].title.as_deref(),
-            Some("GitHub Personal Token")
+            exported.items[0].title,
+            Some(Some("GitHub Personal Token".to_string()))
         );
 
-        // Simulate payload from an older client that does not know about `title`
-        let older_payload: ClipboardItem = serde_json::from_str(
+        // 1. Simulate payload from an older client that does not know about `title` (field absent)
+        let older_payload: SyncedClipboardItem = serde_json::from_str(
             r#"{
                 "id": "sync-1",
                 "type": "text",
@@ -2875,15 +2995,40 @@ mod tests {
         .unwrap();
         assert_eq!(older_payload.title, None);
 
-        apply_synced_item_with_fts(&conn, &older_payload, &key, &fts, None).unwrap();
+        apply_synced_item_with_fts(&conn_b, &older_payload, &key, &fts_b, None).unwrap();
 
-        // Existing title must NOT be wiped by older client payload without `title`
-        let after = get_item(&conn, "sync-1", &key).unwrap().unwrap();
-        assert_eq!(after.title.as_deref(), Some("GitHub Personal Token"));
-        assert!(after.favorite);
+        // Existing title on device B must NOT be wiped by older client payload without `title`
+        let after_old = get_item(&conn_b, "sync-1", &key).unwrap().unwrap();
+        assert_eq!(after_old.title.as_deref(), Some("GitHub Personal Token"));
+        assert!(after_old.favorite);
+        assert_eq!(
+            fts_b.search("GitHub Personal", 10).unwrap(),
+            vec!["sync-1".to_string()]
+        );
 
-        // FTS index must also still match the preserved title
-        let fts_hits = fts.search("GitHub Personal", 10).unwrap();
-        assert_eq!(fts_hits, vec!["sync-1".to_string()]);
+        // 2. Device A clears the title; export_for_sync must emit explicit `"title": null`
+        rename_item_with_fts(&conn_a, "sync-1", None, &key, &fts_a).unwrap();
+        let exported_cleared = export_for_sync(&conn_a, None, 10, &key).unwrap();
+        assert_eq!(exported_cleared.items[0].title, Some(None));
+        let wire_json = serde_json::to_value(&exported_cleared.items[0]).unwrap();
+        assert!(
+            wire_json.get("title").is_some_and(|v| v.is_null()),
+            "export_for_sync must emit explicit null for a cleared title; got {wire_json}"
+        );
+
+        // Deserialize the exported wire JSON on device B and apply — clear must propagate!
+        let cleared_payload: SyncedClipboardItem = serde_json::from_value(wire_json).unwrap();
+        assert_eq!(cleared_payload.title, Some(None));
+        apply_synced_item_with_fts(&conn_b, &cleared_payload, &key, &fts_b, None).unwrap();
+
+        let after_clear = get_item(&conn_b, "sync-1", &key).unwrap().unwrap();
+        assert_eq!(
+            after_clear.title, None,
+            "explicit null title must clear existing title on synced device"
+        );
+        assert!(
+            fts_b.search("GitHub Personal", 10).unwrap().is_empty(),
+            "cleared title must also be removed from FTS on synced device"
+        );
     }
 }

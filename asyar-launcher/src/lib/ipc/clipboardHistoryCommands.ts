@@ -10,7 +10,7 @@ export interface StoredClipboardItem {
   type: string;
   content?: string;
   preview?: string;
-  title?: string;
+  title?: string | null;
   createdAt: number;
   favorite: boolean;
   metadata?: Record<string, unknown>;
@@ -149,6 +149,9 @@ export async function clipboardClearNonFavorites(): Promise<ClipboardClearResult
   return invokeSafe<ClipboardClearResult>('clipboard_clear_non_favorites');
 }
 
-export async function clipboardRenameItem(id: string, title: string | null): Promise<void> {
-  return invokeSafe<void>('clipboard_rename_item', { id, title });
+export async function clipboardRenameItem(
+  id: string,
+  title: string | null,
+): Promise<string | null> {
+  return invokeSafe<string | null>('clipboard_rename_item', { id, title });
 }

@@ -269,15 +269,12 @@ export class ClipboardViewStateClass {
 
   async renameItem(itemId: string, title: string | null): Promise<boolean> {
     try {
-      const trimmed = title?.trim() ?? '';
-      const normalized =
-        trimmed.length > 0 ? Array.from(trimmed).slice(0, 200).join('') : undefined;
-      await clipboardHistoryStore.renameHistoryItem(itemId, normalized ?? null);
+      const nextTitle = await clipboardHistoryStore.renameHistoryItem(itemId, title);
       this.items = this.items.map((item) => {
         if (item.id !== itemId) return item;
         const copy: ClipboardHistoryItem = { ...item };
-        if (normalized !== undefined) {
-          copy.title = normalized;
+        if (nextTitle !== undefined) {
+          copy.title = nextTitle;
         } else {
           delete copy.title;
         }

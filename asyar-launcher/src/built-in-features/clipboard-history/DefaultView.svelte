@@ -411,17 +411,6 @@
     await clipboardViewState.renameItem(target.id, renameValue);
   }
 
-  function handleRenameKeydown(e: KeyboardEvent) {
-    e.stopPropagation();
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      void handleRenameSubmit();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      clipboardViewState.closeRenameDialog();
-    }
-  }
-
   function sanitizeHtml(html: string): string {
     const raw = html.length > MAX_PREVIEW_CHARS ? html.substring(0, MAX_PREVIEW_CHARS) : html;
     if (!raw) return '';
@@ -1046,12 +1035,12 @@
   </div>
 
   <Modal
-    open={Boolean(renamingItem)}
-    maxWidth="380px"
-    onclose={() => clipboardViewState.closeRenameDialog()}
+    isOpen={Boolean(renamingItem)}
+    width="380px"
+    onEscape={() => clipboardViewState.closeRenameDialog()}
+    onEnter={handleRenameSubmit}
   >
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="flex flex-col gap-3 p-4" onkeydown={(e) => e.stopPropagation()}>
+    <div class="flex flex-col gap-3 p-4">
       <div class="flex items-center justify-between">
         <span class="text-md font-medium text-primary">
           {t('features.clipboard.act.rename')}
@@ -1070,7 +1059,6 @@
           ? getDerivedClipboardItemTitle(renamingItem)
           : t('features.clipboard.act.rename_placeholder')}
         autofocus
-        onkeydown={handleRenameKeydown}
       />
       <span class="text-xs text-tertiary">
         {t('features.clipboard.act.rename_placeholder')}

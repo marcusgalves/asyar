@@ -3,6 +3,19 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent } from '@testing-library/svelte';
 import { tick } from 'svelte';
 
+// jsdom has no layout/top-layer engine, so HTMLDialogElement.showModal()/close()
+// (used by Modal.svelte) aren't implemented natively. Provide the minimal stub
+// so dialog.open reflects whether Modal actually opened/closed the <dialog>.
+if (typeof HTMLDialogElement !== 'undefined' && !HTMLDialogElement.prototype.showModal) {
+  HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) {
+    this.setAttribute('open', '');
+  };
+  HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
+    this.removeAttribute('open');
+    this.dispatchEvent(new Event('close'));
+  };
+}
+
 // Hoisted so the store mock below can list them. The text item comes first so
 // the view's initial auto-selection doesn't start an image read.
 const items = vi.hoisted((): Record<string, any> => ({
@@ -232,15 +245,21 @@ describe('DefaultView image preview', () => {
         createdAt: 100,
       } as any,
     ];
-    const { unmount } = render(DefaultView);
+    vi.mocked(clipboardHistoryStore.renameHistoryItem).mockResolvedValueOnce('Updated Title');
+    const { container, unmount } = render(DefaultView);
     await flush();
 
     // Custom title is rendered in the list instead of raw preview
     expect(screen.getByText('My API Token')).toBeTruthy();
 
+    const dialog = container.querySelector('dialog.modal') as HTMLDialogElement;
+    expect(dialog).toBeTruthy();
+    expect(dialog.open).toBe(false);
+
     // Open rename dialog prefilled with current custom title
     clipboardViewState.openRenameDialog(clipboardViewState.selectedItem);
     await flush();
+    expect(dialog.open).toBe(true);
 
     const input = screen.getByPlaceholderText('raw preview text') as HTMLInputElement;
     expect(input.value).toBe('My API Token');
@@ -252,16 +271,29 @@ describe('DefaultView image preview', () => {
 
     expect(clipboardHistoryStore.renameHistoryItem).toHaveBeenCalledWith('titled', 'Updated Title');
     expect(clipboardViewState.renamingItem).toBeNull();
+    expect(dialog.open).toBe(false);
 
-    // Re-open, clear to empty string, and save -> resets to null
+    // Re-open and cancel (native dialog Escape dispatches cancel event)
     clipboardViewState.openRenameDialog(clipboardViewState.selectedItem);
     await flush();
+    expect(dialog.open).toBe(true);
+    await fireEvent(dialog, new Event('cancel', { cancelable: true }));
+    await flush();
+    expect(clipboardViewState.renamingItem).toBeNull();
+    expect(dialog.open).toBe(false);
+
+    // Re-open, clear to whitespace string, and save -> passes raw input to store (Rust normalizes)
+    vi.mocked(clipboardHistoryStore.renameHistoryItem).mockResolvedValueOnce(undefined);
+    clipboardViewState.openRenameDialog(clipboardViewState.selectedItem);
+    await flush();
+    expect(dialog.open).toBe(true);
     const input2 = screen.getByPlaceholderText('raw preview text') as HTMLInputElement;
     await fireEvent.input(input2, { target: { value: '   ' } });
     await fireEvent.keyDown(input2, { key: 'Enter' });
     await flush();
 
-    expect(clipboardHistoryStore.renameHistoryItem).toHaveBeenCalledWith('titled', null);
+    expect(clipboardHistoryStore.renameHistoryItem).toHaveBeenCalledWith('titled', '   ');
+    expect(dialog.open).toBe(false);
     unmount();
   });
 });
