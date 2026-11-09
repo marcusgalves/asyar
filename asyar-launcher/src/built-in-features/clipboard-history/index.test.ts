@@ -31,6 +31,10 @@ vi.mock('../../lib/ipc/commands', () => ({
   ocrClipboardItemText: vi.fn().mockResolvedValue(null),
 }));
 
+vi.mock('../../lib/keyboard/hostPlatform', () => ({
+  getHostPlatform: vi.fn(() => 'macos'),
+}));
+
 vi.mock('../../services/extension/viewManager.svelte', () => ({
   viewManager: {
     goBack: vi.fn(),
@@ -1206,5 +1210,39 @@ describe('Copy Text From Image action', () => {
 
     const { ocrClipboardItemText } = await import('../../lib/ipc/commands');
     expect(ocrClipboardItemText).not.toHaveBeenCalled();
+  });
+
+  it('is hidden off macOS even when an Image item is selected', async () => {
+    await extension.executeCommand('show-clipboard');
+
+    const { actionService } = await import('../../services/action/actionService.svelte');
+    const ocrAction = vi
+      .mocked(actionService.registerAction)
+      .mock.calls.find((c) => c[0].id === 'clipboard-history:copy-text-from-image')?.[0] as any;
+    expect(ocrAction).toBeDefined();
+
+    const mockState = await import('./state.svelte');
+    (mockState.clipboardViewState as any).selectedItem = {
+      id: 'img-1',
+      type: ClipboardItemType.Image,
+      content: '/app/data/clipboard_cache/img-1.png',
+      createdAt: Date.now(),
+      favorite: false,
+    };
+
+    const { getHostPlatform } = await import('../../lib/keyboard/hostPlatform');
+    vi.mocked(getHostPlatform).mockReturnValue('windows');
+    expect(ocrAction.visible()).toBe(false);
+    await ocrAction.execute();
+
+    vi.mocked(getHostPlatform).mockReturnValue('other');
+    expect(ocrAction.visible()).toBe(false);
+    await ocrAction.execute();
+
+    const { ocrClipboardItemText } = await import('../../lib/ipc/commands');
+    expect(ocrClipboardItemText).not.toHaveBeenCalled();
+
+    vi.mocked(getHostPlatform).mockReturnValue('macos');
+    expect(ocrAction.visible()).toBe(true);
   });
 });

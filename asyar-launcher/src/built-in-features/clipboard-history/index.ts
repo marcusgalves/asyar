@@ -10,6 +10,7 @@ import { viewManager } from '../../services/extension/viewManager.svelte';
 
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { ocrClipboardItemText } from '../../lib/ipc/commands';
+import { getHostPlatform } from '../../lib/keyboard/hostPlatform';
 import {
   type Extension,
   type ExtensionContext,
@@ -423,8 +424,11 @@ class ClipboardHistoryExtension implements Extension {
       category: 'clipboard-action',
       extensionId: 'clipboard-history',
       context: ActionContext.EXTENSION_VIEW,
-      visible: () => clipboardViewState.selectedItem?.type === ClipboardItemType.Image,
+      visible: () =>
+        getHostPlatform() === 'macos' &&
+        clipboardViewState.selectedItem?.type === ClipboardItemType.Image,
       execute: async () => {
+        if (getHostPlatform() !== 'macos') return;
         const selected = clipboardViewState.selectedItem;
         if (!selected || selected.type !== ClipboardItemType.Image) return;
         await ocrClipboardItemText(selected.id);

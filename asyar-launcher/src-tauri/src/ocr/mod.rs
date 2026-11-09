@@ -76,12 +76,23 @@ pub enum OcrEvaluation {
     },
 }
 
+/// Default HUD message when Screen OCR finds no text.
+pub const EMPTY_SCREEN_OCR_HUD_MESSAGE: &str = "No text found in selected area";
+
+/// Default HUD message when Clipboard Image OCR finds no text.
+pub const EMPTY_IMAGE_OCR_HUD_MESSAGE: &str = "No text found in image";
+
 /// Evaluates raw OCR text: applies secret redaction and determines HUD notification copy.
 pub fn evaluate_ocr_text(raw_text: &str) -> OcrEvaluation {
+    evaluate_ocr_text_with_empty_hud(raw_text, EMPTY_SCREEN_OCR_HUD_MESSAGE)
+}
+
+/// Evaluates raw OCR text with a caller-specific empty-text HUD notification message.
+pub fn evaluate_ocr_text_with_empty_hud(raw_text: &str, empty_hud_message: &str) -> OcrEvaluation {
     let trimmed = raw_text.trim();
     if trimmed.is_empty() {
         return OcrEvaluation::Empty {
-            hud_message: "No text found in selected area".to_string(),
+            hud_message: empty_hud_message.to_string(),
         };
     }
 
@@ -146,7 +157,7 @@ pub async fn capture_screen_text(
     let _ = std::fs::remove_file(&temp_path);
 
     // 4. Local on-device OCR + secret redaction + clipboard write + HUD
-    recognize_and_copy_text(app_handle, image_bytes).await
+    recognize_and_copy_text(app_handle, image_bytes, EMPTY_SCREEN_OCR_HUD_MESSAGE).await
 }
 
 /// Runs local OCR on `image_bytes`, applies secret redaction, writes any
@@ -155,12 +166,13 @@ pub async fn capture_screen_text(
 async fn recognize_and_copy_text(
     app_handle: &tauri::AppHandle,
     image_bytes: Vec<u8>,
+    empty_hud_message: &'static str,
 ) -> Result<Option<String>, AppError> {
     let raw_text = tauri::async_runtime::spawn_blocking(move || recognize_text(&image_bytes))
         .await
         .map_err(|e| AppError::Platform(format!("OCR task failed: {e}")))??;
 
-    match evaluate_ocr_text(&raw_text) {
+    match evaluate_ocr_text_with_empty_hud(&raw_text, empty_hud_message) {
         OcrEvaluation::Empty { hud_message } => {
             let app_clone = app_handle.clone();
             let _ = app_handle.run_on_main_thread(move || {
@@ -264,7 +276,7 @@ pub async fn ocr_clipboard_item_text(
         resolve_clipboard_image_path(&conn, &app_data_dir, id, keystore.master_key())?
     };
     let image_bytes = std::fs::read(&image_path)?;
-    recognize_and_copy_text(app_handle, image_bytes).await
+    recognize_and_copy_text(app_handle, image_bytes, EMPTY_IMAGE_OCR_HUD_MESSAGE).await
 }
 
 #[cfg(test)]
@@ -281,6 +293,14 @@ mod tests {
 
         let res2 = evaluate_ocr_text("   \n\t  ");
         assert!(matches!(res2, OcrEvaluation::Empty { .. }));
+
+        let res_img = evaluate_ocr_text_with_empty_hud("   ", EMPTY_IMAGE_OCR_HUD_MESSAGE);
+        assert_eq!(
+            res_img,
+            OcrEvaluation::Empty {
+                hud_message: "No text found in image".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -463,6 +483,32 @@ mod tests {
         assert!(
             matches!(err, AppError::NotFound(_)),
             "expected AppError::NotFound, got {err:?}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_resolve_clipboard_image_path_empty_or_none_content() {
+        let (conn, key) = test_db_and_key();
+        let root = temp_app_data_dir("empty_content");
+
+        let none_item = make_clipboard_item("img-none", "image", None);
+        crate::storage::clipboard::add_item(&conn, &none_item, &key).unwrap();
+        let err_none = resolve_clipboard_image_path(&conn, &root, "img-none", &key)
+            .expect_err("image item with None content should fail");
+        assert!(
+            matches!(err_none, AppError::Validation(_)),
+            "expected AppError::Validation, got {err_none:?}"
+        );
+
+        let blank_item = make_clipboard_item("img-blank", "image", Some("   \t\n  ".to_string()));
+        crate::storage::clipboard::add_item(&conn, &blank_item, &key).unwrap();
+        let err_blank = resolve_clipboard_image_path(&conn, &root, "img-blank", &key)
+            .expect_err("image item with whitespace-only content should fail");
+        assert!(
+            matches!(err_blank, AppError::Validation(_)),
+            "expected AppError::Validation, got {err_blank:?}"
         );
 
         std::fs::remove_dir_all(&root).ok();
