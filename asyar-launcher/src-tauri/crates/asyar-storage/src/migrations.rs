@@ -80,6 +80,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "runs_history_quiet_success",
         up: migration_11_runs_history_quiet_success,
     },
+    Migration {
+        version: 12,
+        name: "clipboard_items_title",
+        up: migration_12_clipboard_items_title,
+    },
 ];
 
 /// Bring `conn` up to the newest ledger version. Idempotent.
@@ -313,6 +318,28 @@ fn migration_11_runs_history_quiet_success(conn: &Connection) -> Result<(), AppE
             [],
         )
         .map_err(|e| AppError::Database(format!("Failed to add quiet_success column: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Adds `clipboard_items.title` (#1009), the encrypted custom display title.
+/// The column was first patched into `clipboard::init_table`, which only
+/// baseline calls, so every database already stamped past v1 never received
+/// it. Guarded because fresh and v0 databases get it from baseline, and
+/// because some installs were hot-fixed by hand with the same `ALTER`.
+fn migration_12_clipboard_items_title(conn: &Connection) -> Result<(), AppError> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('clipboard_items') WHERE name='title'",
+            [],
+            |row| row.get::<_, i32>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+
+    if !exists {
+        conn.execute("ALTER TABLE clipboard_items ADD COLUMN title TEXT", [])
+            .map_err(|e| AppError::Database(format!("Failed to add title column: {e}")))?;
     }
     Ok(())
 }
@@ -798,8 +825,146 @@ mod tests {
 
         assert!(column_names(&conn, "snippets").contains(&"redacted_kinds".to_string()));
         assert!(column_names(&conn, "clipboard_items").contains(&"content_hash".to_string()));
+        assert!(column_names(&conn, "clipboard_items").contains(&"title".to_string()));
         assert_eq!(names_of(&conn, "table"), EXPECTED_TABLES);
         assert_eq!(user_version(&conn), MIGRATIONS.last().unwrap().version);
+    }
+
+    /// A database stamped at v11 by a build that predates `clipboard_items.title`:
+    /// baseline's `init_table` never replays for it, so the column is absent.
+    fn stamped_v11_db_without_clipboard_title() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        run_ledger(&conn, &MIGRATIONS[..11]).unwrap();
+        assert_eq!(user_version(&conn), 11);
+        conn.execute_batch("ALTER TABLE clipboard_items DROP COLUMN title;")
+            .unwrap();
+        assert!(!column_names(&conn, "clipboard_items").contains(&"title".to_string()));
+        conn
+    }
+
+    /// Runs every clipboard read path that selects `title` and fails on any
+    /// SQL error, so a missing column surfaces here instead of in production.
+    fn exercise_clipboard_queries(conn: &Connection) {
+        use crate::clipboard::{self, ClipboardItem, Cursor};
+        use crate::clipboard_fts::{self, ClipboardFts};
+
+        let key: [u8; 32] = rand::random();
+        for (id, favorite, created_at) in [("fav", true, 3.0), ("recent", false, 2.0)] {
+            let item = ClipboardItem {
+                id: id.to_string(),
+                item_type: "text".to_string(),
+                content: Some(format!("{id} ledger probe")),
+                preview: Some(format!("{id} ledger probe")),
+                title: None,
+                created_at,
+                favorite,
+                metadata: None,
+                source_app: None,
+                redacted_kinds: None,
+            };
+            clipboard::add_item(conn, &item, &key).unwrap();
+        }
+        clipboard::rename_item(conn, "fav", Some("Renamed favorite".into()), &key).unwrap();
+
+        let initial = clipboard::list_initial(conn, 10, &key).unwrap();
+        assert_eq!(initial.favorites.len(), 1);
+        assert_eq!(
+            initial.favorites[0].title.as_deref(),
+            Some("Renamed favorite")
+        );
+        assert_eq!(initial.recent.len(), 1);
+
+        let older = clipboard::list_older(
+            conn,
+            &Cursor {
+                created_at: 10.0,
+                id: "zzz".into(),
+            },
+            10,
+            &key,
+        )
+        .unwrap();
+        assert_eq!(older.items.len(), 1);
+
+        let fav = clipboard::get_item(conn, "fav", &key).unwrap().unwrap();
+        assert_eq!(fav.title.as_deref(), Some("Renamed favorite"));
+        assert_eq!(clipboard::get_recent(conn, 10, &key).unwrap().len(), 2);
+        assert_eq!(clipboard::get_all(conn, &key).unwrap().len(), 2);
+
+        let export = clipboard::export_for_sync(conn, None, 10, &key).unwrap();
+        assert_eq!(export.items.len(), 2);
+
+        // Startup FTS rebuild reads `title` from disk too.
+        let fts = ClipboardFts::new_in_memory().unwrap();
+        clipboard_fts::rebuild_from_disk(conn, &fts, &key).unwrap();
+        clipboard_fts::mark_ready();
+        // FTS_READY is a process-wide flag another test may reset, so only an
+        // SQL error is a hard failure; hits are checked when the index is ready.
+        let found = clipboard::search(conn, &fts, "Renamed favorite", 10, &key).unwrap();
+        if found.index_state == "ready" {
+            assert_eq!(found.items.len(), 1);
+            assert_eq!(found.items[0].id, "fav");
+        }
+    }
+
+    #[test]
+    fn stamped_db_without_clipboard_title_gets_the_column_and_keeps_its_items() {
+        let conn = stamped_v11_db_without_clipboard_title();
+        conn.execute(
+            "INSERT INTO clipboard_items (id, item_type, content, preview, created_at, favorite)
+                 VALUES ('c1', 'text', 'ciphertext', 'prev', 1.0, 1)",
+            [],
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        assert_eq!(user_version(&conn), MIGRATIONS.last().unwrap().version);
+        assert!(column_names(&conn, "clipboard_items").contains(&"title".to_string()));
+        let (content, favorite, title): (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT content, favorite, title FROM clipboard_items WHERE id = 'c1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            content, "ciphertext",
+            "existing rows must survive untouched"
+        );
+        assert_eq!(favorite, 1);
+        assert_eq!(title, None, "existing items have no custom title");
+    }
+
+    #[test]
+    fn stamped_db_with_hand_added_clipboard_title_migrates_without_error() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_ledger(&conn, &MIGRATIONS[..11]).unwrap();
+        // The hot-fixed case: column already present (by hand or via baseline).
+        assert!(column_names(&conn, "clipboard_items").contains(&"title".to_string()));
+
+        run(&conn).unwrap();
+
+        assert_eq!(user_version(&conn), MIGRATIONS.last().unwrap().version);
+        let title_columns = column_names(&conn, "clipboard_items")
+            .into_iter()
+            .filter(|c| c == "title")
+            .count();
+        assert_eq!(title_columns, 1);
+    }
+
+    /// End-to-end over the production bootstrap (`migrations::run`, never a
+    /// direct `init_table`): every clipboard query must work on both an
+    /// upgraded install and a fresh one.
+    #[test]
+    fn clipboard_queries_work_after_production_migration_path() {
+        let upgraded = stamped_v11_db_without_clipboard_title();
+        run(&upgraded).unwrap();
+        exercise_clipboard_queries(&upgraded);
+
+        let fresh = Connection::open_in_memory().unwrap();
+        run(&fresh).unwrap();
+        exercise_clipboard_queries(&fresh);
     }
 
     #[test]
