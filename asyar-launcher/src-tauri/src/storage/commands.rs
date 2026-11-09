@@ -195,6 +195,24 @@ pub fn clipboard_clear_non_favorites(
     )?)
 }
 
+#[tauri::command]
+pub fn clipboard_rename_item(
+    id: String,
+    title: Option<String>,
+    store: State<'_, DataStore>,
+    keystore: State<'_, KeystoreState>,
+    fts: State<'_, Arc<ClipboardFts>>,
+) -> Result<(), AppError> {
+    let conn = store.conn()?;
+    Ok(super::clipboard::rename_item_with_fts(
+        &conn,
+        &id,
+        title,
+        keystore.master_key(),
+        fts.inner(),
+    )?)
+}
+
 // ── Snippets ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]

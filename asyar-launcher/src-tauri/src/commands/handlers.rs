@@ -199,6 +199,7 @@ macro_rules! storage_commands {
                 $crate::commands::secret_detection::secret_detection_redact,
                 $crate::commands::secret_detection::secret_detection_get_session_stats,
                 $crate::commands::secret_detection::secret_detection_get_catalog,
+                $crate::storage::commands::clipboard_rename_item,
             )
         )
     };

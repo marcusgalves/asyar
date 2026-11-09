@@ -9,6 +9,7 @@ import {
   clipboardToggleFavorite,
   clipboardDeleteItem,
   clipboardClearNonFavorites,
+  clipboardRenameItem,
   type StoredClipboardItem,
   type StoredClipboardListItem,
   type ClipboardCursor,
@@ -121,12 +122,18 @@ export class ClipboardHistoryStoreClass {
     const removed = new Set(res.evictedIds);
     if (res.replacedId) removed.add(res.replacedId);
     removed.add(res.insertedId);
+    const prevTitle = res.replacedId
+      ? (this.favorites.find((i) => i.id === res.replacedId)?.title ??
+        this.recent.find((i) => i.id === res.replacedId)?.title)
+      : undefined;
     this.recent = this.recent.filter((i) => !removed.has(i.id));
     this.favorites = this.favorites.filter((i) => !removed.has(i.id));
+    const effectiveTitle = stored.title ?? prevTitle;
     const newRow: ListItem = {
       id: res.insertedId,
       type: stored.type,
       preview: stored.preview,
+      ...(effectiveTitle ? { title: effectiveTitle } : {}),
       createdAt: stored.createdAt,
       favorite: res.favorite,
       metadata: stored.metadata,
@@ -179,6 +186,30 @@ export class ClipboardHistoryStoreClass {
       this.searchResults = this.searchResults.map((i) =>
         i.id === id ? { ...i, favorite: newFavorite } : i,
       );
+    }
+    this.#notify({ type: 'upsert', itemId: id });
+  }
+
+  async renameHistoryItem(id: string, title: string | null): Promise<void> {
+    const trimmed = title?.trim() ?? '';
+    const normalized = trimmed.length > 0 ? Array.from(trimmed).slice(0, 200).join('') : undefined;
+    await clipboardRenameItem(id, normalized ?? null);
+
+    const updateTitle = (item: ListItem): ListItem => {
+      if (item.id !== id) return item;
+      const copy: ListItem = { ...item };
+      if (normalized !== undefined) {
+        copy.title = normalized;
+      } else {
+        delete copy.title;
+      }
+      return copy;
+    };
+
+    this.favorites = this.favorites.map(updateTitle);
+    this.recent = this.recent.map(updateTitle);
+    if (this.searchResults) {
+      this.searchResults = this.searchResults.map(updateTitle);
     }
     this.#notify({ type: 'upsert', itemId: id });
   }

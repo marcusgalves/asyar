@@ -42,6 +42,7 @@ export interface ClipboardHistoryItem {
   type: ClipboardItemType;
   content?: string;
   preview?: string;
+  title?: string;
   createdAt: number;
   favorite: boolean;
   metadata?: ClipboardItemMetadata;

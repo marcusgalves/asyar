@@ -110,6 +110,7 @@ fn make_item(i: u32, base_time: f64) -> ClipboardItem {
         item_type: "text".to_string(),
         content: Some(body),
         preview: Some(preview),
+        title: None,
         // Newest items first — spread across the last 30 days.
         created_at: base_time - (i as f64) * 60_000.0,
         favorite: i.is_multiple_of(1000), // ~0.1% favorited

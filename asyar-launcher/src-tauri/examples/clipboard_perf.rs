@@ -35,6 +35,7 @@ fn make_text_item(i: u32, base_ms: f64) -> ClipboardItem {
             "perf body number {i} the quick brown fox jumps over the lazy dog"
         )),
         preview: Some(format!("perf body number {i}")),
+        title: None,
         // i=0 → base_ms (now), i=N-1 → base_ms - spread_ms
         created_at: base_ms - (i as f64 / 10000.0) * spread_ms,
         favorite: false,

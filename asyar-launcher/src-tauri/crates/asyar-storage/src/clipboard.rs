@@ -34,6 +34,8 @@ pub struct ClipboardItem {
     pub content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub created_at: f64,
     pub favorite: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -48,7 +50,7 @@ pub struct ClipboardItem {
     pub redacted_kinds: Option<Vec<String>>,
 }
 
-/// Hot-path list payload — decrypts `preview` only, never `content`.
+/// Hot-path list payload — decrypts `preview` and `title` only, never `content`.
 /// Returned by all paged-list and search IPCs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,6 +60,8 @@ pub struct ClipboardListItem {
     pub item_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub created_at: f64,
     pub favorite: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -265,33 +269,64 @@ pub fn init_table(conn: &Connection) -> Result<(), AppError> {
     )
     .map_err(|e| AppError::Database(format!("Failed to create idx_clipboard_hash: {e}")))?;
 
+    // Migration: add title column if it doesn't exist yet. Nullable custom
+    // display title encrypted under master_key (same as preview).
+    let title_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('clipboard_items') WHERE name='title'",
+            [],
+            |row| row.get::<_, i32>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+
+    if !title_exists {
+        conn.execute("ALTER TABLE clipboard_items ADD COLUMN title TEXT", [])
+            .map_err(|e| AppError::Database(format!("Failed to add title column: {e}")))?;
+    }
+
     Ok(())
 }
 
-/// Insert or replace a clipboard item (upsert by id). The `content` and
-/// `preview` columns are encrypted under `master_key` before insertion;
-/// every other column stays plaintext so SQL filters and sorts work.
+/// Maximum number of Unicode scalar values allowed in a custom clipboard title.
+pub const MAX_TITLE_CHARS: usize = 200;
+
+/// Trim whitespace, collapse empty/whitespace-only strings to `None`, and cap
+/// length at [`MAX_TITLE_CHARS`] characters (UTF-8 char-boundary safe).
+pub fn normalize_title(raw: Option<&str>) -> Option<String> {
+    let trimmed = raw?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(MAX_TITLE_CHARS).collect())
+}
+
+/// Insert or replace a clipboard item (upsert by id). The `content`,
+/// `preview`, and `title` columns are encrypted under `master_key` before
+/// insertion; every other column stays plaintext so SQL filters and sorts work.
 pub fn add_item(
     conn: &Connection,
     item: &ClipboardItem,
     master_key: &[u8; 32],
 ) -> Result<(), AppError> {
-    // If an existing row exists, and incoming content/preview is None or empty,
+    // If an existing row exists, and incoming content/preview/title is None or empty,
     struct ExistingRow {
         content: Option<String>,
         preview: Option<String>,
         content_hash: Option<Vec<u8>>,
+        title: Option<String>,
     }
 
     let existing: Option<ExistingRow> = conn
         .query_row(
-            "SELECT content, preview, content_hash FROM clipboard_items WHERE id = ?1",
+            "SELECT content, preview, content_hash, title FROM clipboard_items WHERE id = ?1",
             params![item.id],
             |r| {
                 Ok(ExistingRow {
                     content: r.get(0)?,
                     preview: r.get(1)?,
                     content_hash: r.get(2)?,
+                    title: r.get(3)?,
                 })
             },
         )
@@ -304,6 +339,11 @@ pub fn add_item(
     let encrypted_preview = match item.preview.as_deref() {
         Some(p) if !p.is_empty() => encrypt_opt(Some(p), master_key)?,
         _ => existing.as_ref().and_then(|e| e.preview.clone()),
+    };
+    let normalized_title = normalize_title(item.title.as_deref());
+    let encrypted_title = match normalized_title.as_deref() {
+        Some(t) => encrypt_opt(Some(t), master_key)?,
+        None => existing.as_ref().and_then(|e| e.title.clone()),
     };
     let content_hash = if item
         .content
@@ -318,8 +358,8 @@ pub fn add_item(
 
     conn.execute(
         "INSERT OR REPLACE INTO clipboard_items
-            (id, item_type, content, preview, created_at, favorite, metadata, source_app, redacted_kinds, content_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            (id, item_type, content, preview, created_at, favorite, metadata, source_app, redacted_kinds, content_hash, title)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             item.id,
             item.item_type,
@@ -331,6 +371,7 @@ pub fn add_item(
             item.source_app.as_ref().map(|m| serde_json::to_string(m).unwrap_or_default()),
             encode_redacted_kinds(&item.redacted_kinds),
             content_hash,
+            encrypted_title,
         ],
     )
     .map_err(|e| AppError::Database(format!("Failed to add clipboard item: {e}")))?;
@@ -345,7 +386,7 @@ pub fn add_item(
 pub fn get_all(conn: &Connection, master_key: &[u8; 32]) -> Result<Vec<ClipboardItem>, AppError> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, item_type, content, preview, created_at, favorite, metadata, source_app, redacted_kinds
+            "SELECT id, item_type, content, preview, created_at, favorite, metadata, source_app, redacted_kinds, title
              FROM clipboard_items
              ORDER BY created_at DESC",
         )
@@ -368,7 +409,7 @@ pub fn get_recent(
     limit: usize,
     master_key: &[u8; 32],
 ) -> Result<Vec<ClipboardItem>, AppError> {
-    let select_cols = "SELECT id, item_type, content, preview, created_at, favorite, metadata, source_app, redacted_kinds";
+    let select_cols = "SELECT id, item_type, content, preview, created_at, favorite, metadata, source_app, redacted_kinds, title";
 
     // Favorites — all of them, newest first.
     let mut fav_stmt = conn
@@ -551,7 +592,7 @@ pub fn export_for_sync(
 ) -> Result<ExportPage, AppError> {
     let probe_limit = (limit as i64).saturating_add(1);
     let select = "SELECT id, item_type, content, preview, created_at, favorite, \
-                         metadata, source_app, redacted_kinds FROM clipboard_items";
+                         metadata, source_app, redacted_kinds, title FROM clipboard_items";
 
     let mut probe: Vec<ClipboardItem> = match cursor {
         Some(c) => conn
@@ -606,7 +647,7 @@ pub fn get_item(
 ) -> Result<Option<ClipboardItem>, AppError> {
     let result = conn.query_row(
         "SELECT id, item_type, content, preview, created_at, favorite,
-                metadata, source_app, redacted_kinds
+                metadata, source_app, redacted_kinds, title
            FROM clipboard_items WHERE id = ?1",
         params![id],
         row_to_item_factory(master_key),
@@ -695,6 +736,48 @@ pub fn toggle_favorite(conn: &Connection, id: &str) -> Result<bool, AppError> {
         .map_err(|e| AppError::Database(format!("Failed to read favorite: {e}")))?;
 
     Ok(new_val)
+}
+
+/// Set or clear the custom display title for a clipboard item.
+///
+/// Whitespace is trimmed; an empty or whitespace-only string becomes `None`
+/// (stored as SQL `NULL`, clearing the custom title). Titles longer than
+/// [`MAX_TITLE_CHARS`] characters are truncated on a UTF-8 char boundary.
+pub fn rename_item(
+    conn: &Connection,
+    id: &str,
+    title: Option<String>,
+    master_key: &[u8; 32],
+) -> Result<(), AppError> {
+    let normalized = normalize_title(title.as_deref());
+    let encrypted_title = encrypt_opt(normalized.as_deref(), master_key)?;
+    conn.execute(
+        "UPDATE clipboard_items SET title = ?1 WHERE id = ?2",
+        params![encrypted_title, id],
+    )
+    .map_err(|e| AppError::Database(format!("Failed to rename clipboard item: {e}")))?;
+    Ok(())
+}
+
+/// FTS-aware wrapper for [`rename_item`]: updates the encrypted `title` column
+/// in SQLite and re-indexes the item in [`ClipboardFts`].
+pub fn rename_item_with_fts(
+    conn: &Connection,
+    id: &str,
+    title: Option<String>,
+    master_key: &[u8; 32],
+    fts: &ClipboardFts,
+) -> Result<(), AppError> {
+    rename_item(conn, id, title, master_key)?;
+    if let Some(item) = get_item(conn, id, master_key)? {
+        fts.upsert(
+            &item.id,
+            item.title.as_deref(),
+            item.preview.as_deref(),
+            item.content.as_deref(),
+        )?;
+    }
+    Ok(())
 }
 
 /// Tombstone the item in the cloud-sync journal then hard-delete it from
@@ -849,7 +932,7 @@ pub fn cleanup(
 /// decrypt-and-deserialise logic lives in one place. SELECT must project
 /// columns in this exact order:
 ///   id, item_type, content, preview, created_at, favorite,
-///   metadata, source_app, redacted_kinds
+///   metadata, source_app, redacted_kinds, title
 fn row_to_item_factory(
     master_key: &[u8; 32],
 ) -> impl Fn(&rusqlite::Row<'_>) -> rusqlite::Result<ClipboardItem> + '_ {
@@ -859,11 +942,13 @@ fn row_to_item_factory(
         let redacted_kinds_str: Option<String> = row.get(8)?;
         let raw_content: Option<String> = row.get(2)?;
         let raw_preview: Option<String> = row.get(3)?;
+        let raw_title: Option<String> = row.get(9)?;
         Ok(ClipboardItem {
             id: row.get(0)?,
             item_type: row.get(1)?,
             content: decrypt_opt(raw_content, master_key),
             preview: decrypt_opt(raw_preview, master_key),
+            title: decrypt_opt(raw_title, master_key),
             created_at: row.get(4)?,
             favorite: row.get::<_, i32>(5)? != 0,
             metadata: metadata_str.and_then(|s| serde_json::from_str(&s).ok()),
@@ -875,7 +960,7 @@ fn row_to_item_factory(
 
 /// Row → ClipboardListItem mapper. SELECT must project columns in this exact order:
 ///   id, item_type, preview, created_at, favorite,
-///   metadata, source_app, redacted_kinds
+///   metadata, source_app, redacted_kinds, title
 fn list_row_to_item_factory(
     master_key: &[u8; 32],
 ) -> impl Fn(&rusqlite::Row<'_>) -> rusqlite::Result<ClipboardListItem> + '_ {
@@ -884,10 +969,12 @@ fn list_row_to_item_factory(
         let source_app_str: Option<String> = row.get(6)?;
         let redacted_kinds_str: Option<String> = row.get(7)?;
         let raw_preview: Option<String> = row.get(2)?;
+        let raw_title: Option<String> = row.get(8)?;
         Ok(ClipboardListItem {
             id: row.get(0)?,
             item_type: row.get(1)?,
             preview: decrypt_opt(raw_preview, master_key),
+            title: decrypt_opt(raw_title, master_key),
             created_at: row.get(3)?,
             favorite: row.get::<_, i32>(4)? != 0,
             metadata: metadata_str.and_then(|s| serde_json::from_str(&s).ok()),
@@ -918,7 +1005,7 @@ pub fn find_duplicate(
         // file path, not free text, and content_hash is NULL for image rows.
         let result = conn.query_row(
             "SELECT id, item_type, content, preview, created_at, favorite,
-                    metadata, source_app, redacted_kinds
+                    metadata, source_app, redacted_kinds, title
                FROM clipboard_items WHERE item_type = ?1 AND id = ?2",
             params![item_type, id],
             row_to_item_factory(master_key),
@@ -939,7 +1026,7 @@ pub fn find_duplicate(
 
     let result = conn.query_row(
         "SELECT id, item_type, content, preview, created_at, favorite,
-                metadata, source_app, redacted_kinds
+                metadata, source_app, redacted_kinds, title
            FROM clipboard_items
           WHERE item_type = ?1 AND content_hash = ?2
           LIMIT 1",
@@ -964,9 +1051,9 @@ const MAX_HISTORY_ITEMS: usize = 50_000;
 /// Shared SELECT column list for `ClipboardListItem` queries. Columns must
 /// match the index expectations of `list_row_to_item_factory` exactly:
 ///   0=id, 1=item_type, 2=preview, 3=created_at, 4=favorite,
-///   5=metadata, 6=source_app, 7=redacted_kinds
+///   5=metadata, 6=source_app, 7=redacted_kinds, 8=title
 const LIST_SELECT_COLS: &str =
-    "SELECT id, item_type, preview, created_at, favorite, metadata, source_app, redacted_kinds";
+    "SELECT id, item_type, preview, created_at, favorite, metadata, source_app, redacted_kinds, title";
 
 /// Atomically record a new clipboard capture:
 pub type IconResolver<'a> = &'a dyn Fn(&str, &Path) -> Option<String>;
@@ -1012,6 +1099,9 @@ pub fn record_capture(
         if dup.favorite {
             new_item.favorite = true;
         }
+        if new_item.title.is_none() {
+            new_item.title = dup.title.clone();
+        }
         // We discard the returned DeleteResult here — the captured item
         // is the same one being re-inserted, so its image path (if any)
         // remains valid.
@@ -1047,9 +1137,11 @@ pub fn record_capture_with_fts(
     if let Some(replaced_id) = &res.replaced_id {
         fts.delete(replaced_id)?;
     }
+    let effective_title = get_item(conn, &res.inserted_id, master_key)?.and_then(|s| s.title);
     // New row is in the DB now — index it.
     fts.upsert(
         &res.inserted_id,
+        effective_title.as_deref(),
         item.preview.as_deref(),
         item.content.as_deref(),
     )?;
@@ -1093,7 +1185,13 @@ pub fn apply_synced_item_with_fts(
 ) -> Result<bool, AppError> {
     let applied = apply_synced_item(conn, item, master_key, retention_ms)?;
     if applied {
-        fts.upsert(&item.id, item.preview.as_deref(), item.content.as_deref())?;
+        let effective_title = get_item(conn, &item.id, master_key)?.and_then(|s| s.title);
+        fts.upsert(
+            &item.id,
+            effective_title.as_deref(),
+            item.preview.as_deref(),
+            item.content.as_deref(),
+        )?;
     }
     Ok(applied)
 }
@@ -1238,6 +1336,7 @@ mod tests {
             item_type: "text".to_string(),
             content: Some(content.to_string()),
             preview: None,
+            title: None,
             created_at: 1000.0 + id.parse::<f64>().unwrap_or(0.0),
             favorite,
             metadata: None,
@@ -1659,6 +1758,7 @@ mod tests {
             item_type: "text".into(),
             content: None,
             preview: None,
+            title: None,
             created_at: 2.0,
             favorite: true,
             metadata: None,
@@ -2146,7 +2246,7 @@ mod tests {
         let row: ClipboardListItem = conn
             .query_row(
                 "SELECT id, item_type, preview, created_at, favorite,
-                        metadata, source_app, redacted_kinds
+                        metadata, source_app, redacted_kinds, title
                    FROM clipboard_items WHERE id = '1'",
                 [],
                 list_row_to_item_factory(&key),
@@ -2616,5 +2716,174 @@ mod tests {
 
         assert_eq!(result.text, "");
         assert_eq!(result.skipped_count, 0);
+    }
+
+    #[test]
+    fn init_table_adds_title_column_on_existing_db_without_title() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE clipboard_items (
+                id TEXT PRIMARY KEY,
+                item_type TEXT NOT NULL,
+                content TEXT,
+                preview TEXT,
+                created_at REAL NOT NULL,
+                favorite INTEGER NOT NULL DEFAULT 0,
+                metadata TEXT
+            );",
+        )
+        .unwrap();
+
+        init_table(&conn).unwrap();
+        // Calling a second time must be idempotent.
+        init_table(&conn).unwrap();
+
+        let has_title: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('clipboard_items') WHERE name='title'",
+                [],
+                |r| r.get::<_, i32>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap();
+        assert!(has_title, "title column must exist after init_table");
+    }
+
+    #[test]
+    fn rename_item_encrypts_at_rest_trims_whitespace_and_clears_on_empty() {
+        let conn = setup();
+        let key = test_key();
+        let mut item = make_item("1", "raw secret content", false);
+        item.preview = Some("raw preview".into());
+        add_item(&conn, &item, &key).unwrap();
+
+        // Set custom title with leading/trailing whitespace.
+        rename_item(&conn, "1", Some("  Staging DB Password  ".into()), &key).unwrap();
+
+        // Verify stored value in SQLite is encrypted with enc:v1:
+        let raw_title: Option<String> = conn
+            .query_row(
+                "SELECT title FROM clipboard_items WHERE id = '1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            raw_title
+                .as_deref()
+                .is_some_and(crate::crypto::cipher::is_encrypted_value),
+            "title must be encrypted at rest in SQLite"
+        );
+
+        // Verify decrypted round-trip in get_item and list_initial
+        let full = get_item(&conn, "1", &key).unwrap().unwrap();
+        assert_eq!(full.title.as_deref(), Some("Staging DB Password"));
+        assert_eq!(full.content.as_deref(), Some("raw secret content"));
+
+        let page = list_initial(&conn, 10, &key).unwrap();
+        assert_eq!(page.recent[0].title.as_deref(), Some("Staging DB Password"));
+        assert_eq!(page.recent[0].preview.as_deref(), Some("raw preview"));
+
+        // Clear with whitespace-only string -> becomes None (SQL NULL)
+        rename_item(&conn, "1", Some("   \t\n  ".into()), &key).unwrap();
+        let raw_after_clear: Option<String> = conn
+            .query_row(
+                "SELECT title FROM clipboard_items WHERE id = '1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            raw_after_clear.is_none(),
+            "whitespace-only title must be stored as SQL NULL"
+        );
+        let full_cleared = get_item(&conn, "1", &key).unwrap().unwrap();
+        assert_eq!(full_cleared.title, None);
+    }
+
+    #[test]
+    fn rename_item_caps_length_on_utf8_char_boundary() {
+        let conn = setup();
+        let key = test_key();
+        add_item(&conn, &make_item("1", "body", false), &key).unwrap();
+
+        // 250 multi-byte characters (4-byte emoji + 2-byte accented char).
+        let long_title: String = "🔑á".chars().cycle().take(250).collect();
+        rename_item(&conn, "1", Some(long_title), &key).unwrap();
+
+        let full = get_item(&conn, "1", &key).unwrap().unwrap();
+        let stored_title = full.title.expect("title should be set");
+        assert_eq!(stored_title.chars().count(), MAX_TITLE_CHARS);
+    }
+
+    #[test]
+    fn rename_item_with_fts_updates_search_index_and_clears_when_reset() {
+        let (conn, fts) = setup_with_fts();
+        let key = test_key();
+
+        let mut item = make_item("1", "x9f8a7b6c5d4", false);
+        item.preview = Some("x9f8a7b6c5d4".into());
+        record_capture_with_fts(&conn, &item, None, &key, &fts, None).unwrap();
+
+        rename_item_with_fts(&conn, "1", Some("Stripe Webhook Secret".into()), &key, &fts).unwrap();
+
+        let hits = fts.search("Stripe Webhook", 10).unwrap();
+        assert_eq!(hits, vec!["1".to_string()]);
+        let page = list_initial(&conn, 10, &key).unwrap();
+        assert_eq!(
+            page.recent[0].title.as_deref(),
+            Some("Stripe Webhook Secret")
+        );
+
+        // Resetting title removes old title tokens from FTS while keeping content searchable.
+        rename_item_with_fts(&conn, "1", None, &key, &fts).unwrap();
+        let after_reset = fts.search("Stripe Webhook", 10).unwrap();
+        assert!(after_reset.is_empty());
+        let content_hit = fts.search("x9f8a7b6c5d4", 10).unwrap();
+        assert_eq!(content_hit, vec!["1".to_string()]);
+    }
+
+    #[test]
+    fn sync_export_and_apply_preserve_title_across_older_client_payloads() {
+        let (conn, fts) = setup_with_fts();
+        let key = test_key();
+
+        let mut item = make_item("sync-1", "secret-token-value", false);
+        item.preview = Some("secret-token-value".into());
+        item.title = Some("GitHub Personal Token".into());
+        apply_synced_item_with_fts(&conn, &item, &key, &fts, None).unwrap();
+
+        // export_for_sync must include the custom title
+        let exported = export_for_sync(&conn, None, 10, &key).unwrap();
+        assert_eq!(exported.items.len(), 1);
+        assert_eq!(
+            exported.items[0].title.as_deref(),
+            Some("GitHub Personal Token")
+        );
+
+        // Simulate payload from an older client that does not know about `title`
+        let older_payload: ClipboardItem = serde_json::from_str(
+            r#"{
+                "id": "sync-1",
+                "type": "text",
+                "content": "secret-token-value",
+                "preview": "secret-token-value",
+                "createdAt": 2000.0,
+                "favorite": true
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(older_payload.title, None);
+
+        apply_synced_item_with_fts(&conn, &older_payload, &key, &fts, None).unwrap();
+
+        // Existing title must NOT be wiped by older client payload without `title`
+        let after = get_item(&conn, "sync-1", &key).unwrap().unwrap();
+        assert_eq!(after.title.as_deref(), Some("GitHub Personal Token"));
+        assert!(after.favorite);
+
+        // FTS index must also still match the preserved title
+        let fts_hits = fts.search("GitHub Personal", 10).unwrap();
+        assert_eq!(fts_hits, vec!["sync-1".to_string()]);
     }
 }

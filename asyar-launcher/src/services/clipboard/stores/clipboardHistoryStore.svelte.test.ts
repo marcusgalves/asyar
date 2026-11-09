@@ -9,6 +9,7 @@ vi.mock('../../../lib/ipc/commands', () => ({
   clipboardToggleFavorite: vi.fn(),
   clipboardDeleteItem: vi.fn(),
   clipboardClearNonFavorites: vi.fn(),
+  clipboardRenameItem: vi.fn(),
 }));
 
 vi.mock('../../settings/settingsService.svelte', () => ({
@@ -38,6 +39,7 @@ const mockCapture = ipc.clipboardRecordCapture as unknown as ReturnType<typeof v
 const mockToggleFavorite = ipc.clipboardToggleFavorite as unknown as ReturnType<typeof vi.fn>;
 const mockDelete = ipc.clipboardDeleteItem as unknown as ReturnType<typeof vi.fn>;
 const mockClear = ipc.clipboardClearNonFavorites as unknown as ReturnType<typeof vi.fn>;
+const mockRename = ipc.clipboardRenameItem as unknown as ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -250,5 +252,28 @@ describe('clipboardHistoryStore', () => {
     expect(clipboardHistoryStore.recent).toHaveLength(0);
     // The search result list itself is also updated.
     expect(clipboardHistoryStore.searchResults?.[0].favorite).toBe(true);
+  });
+
+  it('renameHistoryItem normalizes title, updates loaded lists, and notifies subscribers', async () => {
+    mockListInitial.mockResolvedValue({
+      favorites: [{ id: 'f1', type: 'text', createdAt: 100, favorite: true }],
+      recent: [{ id: 'r1', type: 'text', createdAt: 50, favorite: false }],
+      nextCursor: undefined,
+    });
+    mockRename.mockResolvedValue(undefined);
+    await clipboardHistoryStore.loadInitial(10);
+
+    const events: any[] = [];
+    const unsub = clipboardHistoryStore.subscribe((e) => events.push(e));
+
+    await clipboardHistoryStore.renameHistoryItem('r1', '  Custom Name  ');
+    expect(mockRename).toHaveBeenCalledWith('r1', 'Custom Name');
+    expect(clipboardHistoryStore.recent[0].title).toBe('Custom Name');
+    expect(events).toEqual([{ type: 'upsert', itemId: 'r1' }]);
+
+    await clipboardHistoryStore.renameHistoryItem('r1', '   ');
+    expect(mockRename).toHaveBeenCalledWith('r1', null);
+    expect(clipboardHistoryStore.recent[0].title).toBeUndefined();
+    unsub();
   });
 });

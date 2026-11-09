@@ -40,7 +40,7 @@ pub fn rebuild_from_disk(
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, item_type, content, preview, content_hash \
+            "SELECT id, item_type, content, preview, content_hash, title \
                FROM clipboard_items ORDER BY created_at DESC, id DESC",
         )
         .map_err(|e| AppError::Database(format!("FTS rebuild prepare: {e}")))?;
@@ -51,6 +51,7 @@ pub fn rebuild_from_disk(
         raw_content: Option<String>,
         raw_preview: Option<String>,
         existing_hash: Option<Vec<u8>>,
+        raw_title: Option<String>,
     }
 
     let rows: Vec<Row> = stmt
@@ -61,6 +62,7 @@ pub fn rebuild_from_disk(
                 raw_content: r.get(2)?,
                 raw_preview: r.get(3)?,
                 existing_hash: r.get(4)?,
+                raw_title: r.get(5)?,
             })
         })
         .map_err(|e| AppError::Database(format!("FTS rebuild query: {e}")))?
@@ -84,7 +86,19 @@ pub fn rebuild_from_disk(
                 Some(v.to_string())
             }
         });
-        fts.upsert(&row.id, preview.as_deref(), content.as_deref())?;
+        let title = row.raw_title.as_deref().and_then(|v| {
+            if cipher::is_encrypted_value(v) {
+                cipher::decrypt(v, master_key).ok()
+            } else {
+                Some(v.to_string())
+            }
+        });
+        fts.upsert(
+            &row.id,
+            title.as_deref(),
+            preview.as_deref(),
+            content.as_deref(),
+        )?;
 
         if row.existing_hash.is_none() && row.item_type != "image" {
             if let Some(c) = content.as_deref() {
@@ -140,7 +154,7 @@ impl ClipboardFts {
         conn.execute_batch(
             "CREATE VIRTUAL TABLE fts_clipboard USING fts5(
                 clip_id UNINDEXED,
-                preview, content,
+                title, preview, content,
                 prefix='2 3',
                 tokenize='unicode61 remove_diacritics 2'
             );",
@@ -155,15 +169,22 @@ impl ClipboardFts {
     pub fn upsert(
         &self,
         id: &str,
+        title: Option<&str>,
         preview: Option<&str>,
         content: Option<&str>,
     ) -> Result<(), AppError> {
         let rowid = rowid_for(id);
         let conn = self.conn.lock().map_err(|_| AppError::Lock)?;
         conn.execute(
-            "INSERT OR REPLACE INTO fts_clipboard(rowid, clip_id, preview, content) \
-             VALUES (?1, ?2, ?3, ?4)",
-            params![rowid, id, preview.unwrap_or(""), content.unwrap_or("")],
+            "INSERT OR REPLACE INTO fts_clipboard(rowid, clip_id, title, preview, content) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                rowid,
+                id,
+                title.unwrap_or(""),
+                preview.unwrap_or(""),
+                content.unwrap_or("")
+            ],
         )
         .map_err(|e| AppError::Database(format!("FTS upsert: {e}")))?;
         Ok(())
@@ -211,7 +232,7 @@ impl ClipboardFts {
             .prepare(
                 "SELECT clip_id FROM fts_clipboard \
                   WHERE fts_clipboard MATCH ?1 \
-                  ORDER BY bm25(fts_clipboard) LIMIT ?2",
+                  ORDER BY bm25(fts_clipboard, 0.0, 2.0, 1.0, 1.0) LIMIT ?2",
             )
             .map_err(|e| AppError::Database(format!("FTS search prepare: {e}")))?
             .query_map(params![sanitized, limit as i64], |row| {
@@ -266,9 +287,14 @@ mod tests {
     #[test]
     fn upsert_then_search_matches() {
         let fts = ClipboardFts::new_in_memory().unwrap();
-        fts.upsert("id-1", Some("greeting"), Some("hello world this is a test"))
-            .unwrap();
-        fts.upsert("id-2", Some("goodbye"), Some("farewell sweet world"))
+        fts.upsert(
+            "id-1",
+            None,
+            Some("greeting"),
+            Some("hello world this is a test"),
+        )
+        .unwrap();
+        fts.upsert("id-2", None, Some("goodbye"), Some("farewell sweet world"))
             .unwrap();
 
         let hits = fts.search("hello", 10).unwrap();
@@ -280,9 +306,36 @@ mod tests {
     }
 
     #[test]
+    fn search_matches_custom_title_and_ranks_title_at_least_as_high_as_preview() {
+        let fts = ClipboardFts::new_in_memory().unwrap();
+        fts.upsert(
+            "preview-hit",
+            None,
+            Some("staging database password"),
+            Some("opaque-secret-value-1"),
+        )
+        .unwrap();
+        fts.upsert(
+            "title-hit",
+            Some("staging database password"),
+            Some("opaque-secret-value-2"),
+            Some("opaque-secret-value-2"),
+        )
+        .unwrap();
+
+        let hits = fts.search("staging database", 10).unwrap();
+        assert_eq!(
+            hits,
+            vec!["title-hit".to_string(), "preview-hit".to_string()],
+            "title match must rank at least as high as preview match"
+        );
+    }
+
+    #[test]
     fn delete_removes_row_from_search() {
         let fts = ClipboardFts::new_in_memory().unwrap();
-        fts.upsert("id-1", None, Some("findable text")).unwrap();
+        fts.upsert("id-1", None, None, Some("findable text"))
+            .unwrap();
         assert_eq!(
             fts.search("findable", 10).unwrap(),
             vec!["id-1".to_string()]
@@ -295,7 +348,7 @@ mod tests {
     fn delete_many_removes_all_specified_rows() {
         let fts = ClipboardFts::new_in_memory().unwrap();
         for i in 0..5u32 {
-            fts.upsert(&i.to_string(), None, Some(&format!("findable {i}")))
+            fts.upsert(&i.to_string(), None, None, Some(&format!("findable {i}")))
                 .unwrap();
         }
         fts.delete_many(&["1".to_string(), "3".to_string()])
@@ -309,7 +362,7 @@ mod tests {
     #[test]
     fn empty_query_returns_empty() {
         let fts = ClipboardFts::new_in_memory().unwrap();
-        fts.upsert("id-1", None, Some("anything")).unwrap();
+        fts.upsert("id-1", None, None, Some("anything")).unwrap();
         assert!(fts.search("   ", 10).unwrap().is_empty());
         assert!(fts.search("", 10).unwrap().is_empty());
     }
@@ -317,8 +370,8 @@ mod tests {
     #[test]
     fn upsert_replaces_existing_row() {
         let fts = ClipboardFts::new_in_memory().unwrap();
-        fts.upsert("id-1", None, Some("apple")).unwrap();
-        fts.upsert("id-1", None, Some("banana")).unwrap();
+        fts.upsert("id-1", None, None, Some("apple")).unwrap();
+        fts.upsert("id-1", None, None, Some("banana")).unwrap();
         assert!(
             fts.search("apple", 10).unwrap().is_empty(),
             "old content gone after replace"
@@ -329,10 +382,12 @@ mod tests {
     #[test]
     fn search_matches_partial_prefix_from_first_character() {
         let fts = ClipboardFts::new_in_memory().unwrap();
-        fts.upsert("id-1", None, Some("apple pie recipe")).unwrap();
-        fts.upsert("id-2", None, Some("applied physics notes"))
+        fts.upsert("id-1", None, None, Some("apple pie recipe"))
             .unwrap();
-        fts.upsert("id-3", None, Some("banana smoothie")).unwrap();
+        fts.upsert("id-2", None, None, Some("applied physics notes"))
+            .unwrap();
+        fts.upsert("id-3", None, None, Some("banana smoothie"))
+            .unwrap();
 
         // Single-character query → "a*" → both "apple" and "applied"
         // share that prefix; banana also starts with "b" so it is excluded.
@@ -359,11 +414,12 @@ mod tests {
     #[test]
     fn search_multi_token_query_prefix_matches_each_token() {
         let fts = ClipboardFts::new_in_memory().unwrap();
-        fts.upsert("id-1", None, Some("quarterly report summary"))
+        fts.upsert("id-1", None, None, Some("quarterly report summary"))
             .unwrap();
-        fts.upsert("id-2", None, Some("quarterly meeting agenda"))
+        fts.upsert("id-2", None, None, Some("quarterly meeting agenda"))
             .unwrap();
-        fts.upsert("id-3", None, Some("annual report")).unwrap();
+        fts.upsert("id-3", None, None, Some("annual report"))
+            .unwrap();
 
         // "quar rep" → "quar* rep*" — implicit AND, only id-1 has both prefixes.
         let hits = fts.search("quar rep", 10).unwrap();
@@ -373,7 +429,8 @@ mod tests {
     #[test]
     fn search_sanitizes_fts5_special_chars() {
         let fts = ClipboardFts::new_in_memory().unwrap();
-        fts.upsert("id-1", None, Some("look here please")).unwrap();
+        fts.upsert("id-1", None, None, Some("look here please"))
+            .unwrap();
         // Without sanitization, these characters would either throw an
         // FTS5 syntax error or shift the query's semantics.
         for raw in ["(look)", "look*", "\"look\"", "look:here", "look'"] {
@@ -406,12 +463,30 @@ mod rebuild_tests {
             item_type: "text".into(),
             content: Some(content.to_string()),
             preview: Some(format!("preview {id}")),
+            title: None,
             created_at: 1000.0,
             favorite: false,
             metadata: None,
             source_app: None,
             redacted_kinds: None,
         }
+    }
+
+    #[test]
+    fn rebuild_from_disk_indexes_custom_titles() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_table(&conn).unwrap();
+        crate::cloud_sync_state::init_table(&conn).unwrap();
+        let key = test_key();
+        let mut item = make_item("titled-1", "unrelated body xyz");
+        item.title = Some("Production API Key".to_string());
+        add_item(&conn, &item, &key).unwrap();
+
+        let fts = ClipboardFts::new_in_memory().unwrap();
+        rebuild_from_disk(&conn, &fts, &key).unwrap();
+
+        let hits = fts.search("Production API", 10).unwrap();
+        assert_eq!(hits, vec!["titled-1".to_string()]);
     }
 
     #[test]
