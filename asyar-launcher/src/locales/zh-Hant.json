@@ -1049,7 +1049,9 @@
         "ask_ai": "針對此項目詢問 AI",
         "ask_ai_desc": "開啟 AI 聊天並預填此剪貼簿文字",
         "clear_history": "清除剪貼簿歷史記錄",
-        "clear_history_desc": "移除所有非最愛的剪貼簿項目"
+        "clear_history_desc": "移除所有非最愛的剪貼簿項目",
+        "copy_text_from_image": "從圖片複製文字",
+        "copy_text_from_image_desc": "辨識並複製所選圖片中的文字"
       },
       "subtitle": "檢視與管理剪貼簿歷史",
       "unsupported_item": "尚未支援——{type} 類型的剪貼簿項目尚無法用於「{action}」。",

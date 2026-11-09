@@ -21,3 +21,16 @@ export async function ocrCaptureScreenText(): Promise<string | null> {
 export async function ocrCaptureScreenTextForExtension(): Promise<string | null> {
   return invokeRaw<string | null>('ocr_capture_screen_text');
 }
+
+/**
+ * Runs local on-device OCR on a cached image item in Clipboard History by ID.
+ *
+ * Resolves the image path from SQLite in Rust, extracts text via Apple Vision
+ * (on macOS), applies secret redaction, copies the text to the system
+ * clipboard, and triggers a HUD notification.
+ *
+ * Returns the recognized/redacted text on success, or null if no text was found.
+ */
+export async function ocrClipboardItemText(id: string): Promise<string | null> {
+  return invokeSafe<string | null>('ocr_clipboard_item_text', { id });
+}

@@ -1049,7 +1049,9 @@
         "ask_ai": "Perguntar à IA sobre isto",
         "ask_ai_desc": "Abrir o chat de IA com este texto da área de transferência preenchido",
         "clear_history": "Limpar histórico da área de transferência",
-        "clear_history_desc": "Remover todos os itens não favoritos da área de transferência"
+        "clear_history_desc": "Remover todos os itens não favoritos da área de transferência",
+        "copy_text_from_image": "Copiar texto da imagem",
+        "copy_text_from_image_desc": "Reconhecer e copiar o texto da imagem selecionada"
       },
       "subtitle": "Veja e gerencie o histórico da área de transferência",
       "unsupported_item": "Ainda não suportado — itens de {type} da área de transferência ainda não podem ser usados com \"{action}\".",

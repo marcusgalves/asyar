@@ -45,6 +45,7 @@ Asyar also records which app each item came from, so you can see the source appl
 - **Clear Selection** — deselects all multi-selected items, without leaving the view. Only appears while a selection is active.
 - **Ask AI about this** — opens AI Chat with the selected text pre-filled.
 - **Clear Clipboard History** — removes all non-favourited items (available from the root search bar too, without opening the view).
+- **Copy Text From Image** — runs on-device OCR on the selected image item and copies any recognized text to your clipboard.
 
 ## Tips
 

@@ -145,12 +145,21 @@ pub async fn capture_screen_text(
     })?;
     let _ = std::fs::remove_file(&temp_path);
 
-    // 4. Local on-device OCR
+    // 4. Local on-device OCR + secret redaction + clipboard write + HUD
+    recognize_and_copy_text(app_handle, image_bytes).await
+}
+
+/// Runs local OCR on `image_bytes`, applies secret redaction, writes any
+/// recognized text to the system clipboard, and displays the native HUD
+/// notification. Shared by Screen OCR and Clipboard Image OCR.
+async fn recognize_and_copy_text(
+    app_handle: &tauri::AppHandle,
+    image_bytes: Vec<u8>,
+) -> Result<Option<String>, AppError> {
     let raw_text = tauri::async_runtime::spawn_blocking(move || recognize_text(&image_bytes))
         .await
         .map_err(|e| AppError::Platform(format!("OCR task failed: {e}")))??;
 
-    // 5. Evaluate text, secret redaction, clipboard write, and HUD
     match evaluate_ocr_text(&raw_text) {
         OcrEvaluation::Empty { hud_message } => {
             let app_clone = app_handle.clone();
@@ -191,6 +200,71 @@ pub async fn capture_screen_text(
             Ok(Some(redacted_text))
         }
     }
+}
+
+/// Resolves a clipboard history item by `id` from SQLite, verifies that it is an
+/// `image` item whose path lives inside the app's `clipboard_cache` directory,
+/// and confirms the file exists on disk.
+pub fn resolve_clipboard_image_path(
+    conn: &rusqlite::Connection,
+    app_data_dir: &std::path::Path,
+    id: &str,
+    master_key: &[u8; 32],
+) -> Result<PathBuf, AppError> {
+    let item = crate::storage::clipboard::get_item(conn, id, master_key)?
+        .ok_or_else(|| AppError::NotFound(format!("clipboard item not found: {id}")))?;
+
+    if item.item_type != "image" {
+        return Err(AppError::Validation(format!(
+            "clipboard item {id} is not an image (found {})",
+            item.item_type
+        )));
+    }
+
+    let raw_path = item
+        .content
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            AppError::Validation(format!("clipboard image item {id} has no file path"))
+        })?;
+
+    let path = PathBuf::from(raw_path);
+    if !crate::clipboard_cache::is_cached_image(app_data_dir, &path) {
+        return Err(AppError::Validation(format!(
+            "clipboard item {id} path is outside clipboard_cache"
+        )));
+    }
+
+    if !path.is_file() {
+        return Err(AppError::NotFound(format!(
+            "cached clipboard image file not found: {}",
+            path.display()
+        )));
+    }
+
+    Ok(path)
+}
+
+/// Runs local OCR on a cached clipboard history image resolved by `id` from the
+/// database, copies any recognized text to the clipboard, and shows the HUD.
+pub async fn ocr_clipboard_item_text(
+    app_handle: &tauri::AppHandle,
+    store: &tauri::State<'_, crate::storage::DataStore>,
+    keystore: &tauri::State<'_, crate::crypto::keystore::KeystoreState>,
+    id: &str,
+) -> Result<Option<String>, AppError> {
+    let app_data_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::Platform(format!("app data dir unavailable: {e}")))?;
+    let image_path = {
+        let conn = store.conn()?;
+        resolve_clipboard_image_path(&conn, &app_data_dir, id, keystore.master_key())?
+    };
+    let image_bytes = std::fs::read(&image_path)?;
+    recognize_and_copy_text(app_handle, image_bytes).await
 }
 
 #[cfg(test)]
@@ -253,5 +327,144 @@ mod tests {
             }
             _ => panic!("expected Success"),
         }
+    }
+
+    fn temp_app_data_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "asyar_ocr_clip_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn test_db_and_key() -> (rusqlite::Connection, [u8; 32]) {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::clipboard::init_table(&conn).unwrap();
+        (conn, [7u8; 32])
+    }
+
+    fn make_clipboard_item(
+        id: &str,
+        item_type: &str,
+        content: Option<String>,
+    ) -> crate::storage::clipboard::ClipboardItem {
+        crate::storage::clipboard::ClipboardItem {
+            id: id.to_string(),
+            item_type: item_type.to_string(),
+            content,
+            preview: Some("preview".to_string()),
+            created_at: 1_000.0,
+            favorite: false,
+            metadata: None,
+            source_app: None,
+            redacted_kinds: None,
+        }
+    }
+
+    #[test]
+    fn test_resolve_clipboard_image_path_success() {
+        let (conn, key) = test_db_and_key();
+        let root = temp_app_data_dir("ok");
+        let cached = crate::clipboard_cache::cached_image_path(&root, "img-1").unwrap();
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, b"png-bytes").unwrap();
+
+        let item = make_clipboard_item(
+            "img-1",
+            "image",
+            Some(cached.to_string_lossy().into_owned()),
+        );
+        crate::storage::clipboard::add_item(&conn, &item, &key).unwrap();
+
+        let resolved = resolve_clipboard_image_path(&conn, &root, "img-1", &key).unwrap();
+        assert_eq!(resolved, cached);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_resolve_clipboard_image_path_not_found() {
+        let (conn, key) = test_db_and_key();
+        let root = temp_app_data_dir("not_found");
+
+        let err = resolve_clipboard_image_path(&conn, &root, "missing-id", &key)
+            .expect_err("missing item id should fail");
+        assert!(
+            matches!(err, AppError::NotFound(_)),
+            "expected AppError::NotFound, got {err:?}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_resolve_clipboard_image_path_not_an_image() {
+        let (conn, key) = test_db_and_key();
+        let root = temp_app_data_dir("not_image");
+
+        let item = make_clipboard_item("txt-1", "text", Some("hello world".to_string()));
+        crate::storage::clipboard::add_item(&conn, &item, &key).unwrap();
+
+        let err = resolve_clipboard_image_path(&conn, &root, "txt-1", &key)
+            .expect_err("non-image item should fail");
+        assert!(
+            matches!(err, AppError::Validation(_)),
+            "expected AppError::Validation, got {err:?}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_resolve_clipboard_image_path_rejects_outside_cache() {
+        let (conn, key) = test_db_and_key();
+        let root = temp_app_data_dir("outside_cache");
+        let outside = root.join("other_dir/img-1.png");
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        std::fs::write(&outside, b"png-bytes").unwrap();
+
+        let item = make_clipboard_item(
+            "img-1",
+            "image",
+            Some(outside.to_string_lossy().into_owned()),
+        );
+        crate::storage::clipboard::add_item(&conn, &item, &key).unwrap();
+
+        let err = resolve_clipboard_image_path(&conn, &root, "img-1", &key)
+            .expect_err("path outside clipboard_cache should fail");
+        assert!(
+            matches!(err, AppError::Validation(_)),
+            "expected AppError::Validation, got {err:?}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_resolve_clipboard_image_path_missing_file() {
+        let (conn, key) = test_db_and_key();
+        let root = temp_app_data_dir("missing_file");
+        let cached = crate::clipboard_cache::cached_image_path(&root, "img-missing").unwrap();
+
+        let item = make_clipboard_item(
+            "img-missing",
+            "image",
+            Some(cached.to_string_lossy().into_owned()),
+        );
+        crate::storage::clipboard::add_item(&conn, &item, &key).unwrap();
+
+        let err = resolve_clipboard_image_path(&conn, &root, "img-missing", &key)
+            .expect_err("missing cached file on disk should fail");
+        assert!(
+            matches!(err, AppError::NotFound(_)),
+            "expected AppError::NotFound, got {err:?}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

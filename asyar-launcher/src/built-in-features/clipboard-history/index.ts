@@ -9,6 +9,7 @@ import { searchStores } from '../../services/search/stores/search.svelte';
 import { viewManager } from '../../services/extension/viewManager.svelte';
 
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { ocrClipboardItemText } from '../../lib/ipc/commands';
 import {
   type Extension,
   type ExtensionContext,
@@ -413,6 +414,22 @@ class ClipboardHistoryExtension implements Extension {
         searchStores.query = text;
       },
     });
+
+    actionService.registerAction({
+      id: 'clipboard-history:copy-text-from-image',
+      title: t('features.clipboard.act.copy_text_from_image'),
+      description: t('features.clipboard.act.copy_text_from_image_desc'),
+      icon: 'icon:type',
+      category: 'clipboard-action',
+      extensionId: 'clipboard-history',
+      context: ActionContext.EXTENSION_VIEW,
+      visible: () => clipboardViewState.selectedItem?.type === ClipboardItemType.Image,
+      execute: async () => {
+        const selected = clipboardViewState.selectedItem;
+        if (!selected || selected.type !== ClipboardItemType.Image) return;
+        await ocrClipboardItemText(selected.id);
+      },
+    });
   }
 
   // Helper method to unregister view-specific actions
@@ -428,6 +445,7 @@ class ClipboardHistoryExtension implements Extension {
     actionService.unregisterAction('clipboard-history:delete');
     actionService.unregisterAction('clipboard-history:clear-multi-selection');
     actionService.unregisterAction('clipboard-history:ask-ai-about-this');
+    actionService.unregisterAction('clipboard-history:copy-text-from-image');
   }
 
   // Called when this extension's view is deactivated

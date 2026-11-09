@@ -1049,7 +1049,9 @@
         "ask_ai": "就此询问 AI",
         "ask_ai_desc": "打开 AI 聊天并预填此剪贴板文本",
         "clear_history": "清除剪贴板历史",
-        "clear_history_desc": "移除所有非收藏的剪贴板项目"
+        "clear_history_desc": "移除所有非收藏的剪贴板项目",
+        "copy_text_from_image": "从图片复制文本",
+        "copy_text_from_image_desc": "识别并复制所选图片中的文本"
       },
       "subtitle": "查看和管理剪贴板历史",
       "unsupported_item": "暂不支持——{type} 类型的剪贴板项目尚无法用于“{action}”。",

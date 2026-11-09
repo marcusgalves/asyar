@@ -27,6 +27,10 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
   openUrl: vi.fn(),
 }));
 
+vi.mock('../../lib/ipc/commands', () => ({
+  ocrClipboardItemText: vi.fn().mockResolvedValue(null),
+}));
+
 vi.mock('../../services/extension/viewManager.svelte', () => ({
   viewManager: {
     goBack: vi.fn(),
@@ -1063,5 +1067,144 @@ describe('Ask AI about this action', () => {
     expect(viewManager.goBack).not.toHaveBeenCalled();
     expect(contextModeService.pinHint).not.toHaveBeenCalled();
     expect(searchStores.query).toBe('');
+  });
+});
+
+describe('Copy Text From Image action', () => {
+  let mockContext: any;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    mockContext = {
+      getService: vi.fn().mockImplementation((name: string) => {
+        if (name === 'extensions') {
+          return {
+            setActiveViewActionLabel: vi.fn(),
+            navigateToView: vi.fn(),
+          };
+        }
+        if (name === 'clipboard') {
+          return { getRecentItems: vi.fn().mockResolvedValue([]) };
+        }
+        return { info: vi.fn(), debug: vi.fn(), error: vi.fn(), warn: vi.fn() };
+      }),
+    };
+
+    await extension.initialize(mockContext as any);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('registers clipboard-history:copy-text-from-image when view activates', async () => {
+    await extension.executeCommand('show-clipboard');
+
+    const { actionService } = await import('../../services/action/actionService.svelte');
+    const actionIds = vi.mocked(actionService.registerAction).mock.calls.map((c) => c[0].id);
+    expect(actionIds).toContain('clipboard-history:copy-text-from-image');
+  });
+
+  it('unregisters clipboard-history:copy-text-from-image when view deactivates', async () => {
+    await extension.executeCommand('show-clipboard');
+    await extension.viewDeactivated('clipboard-history/DefaultView');
+
+    const { actionService } = await import('../../services/action/actionService.svelte');
+    expect(actionService.unregisterAction).toHaveBeenCalledWith(
+      'clipboard-history:copy-text-from-image',
+    );
+  });
+
+  it('is visible only when the selected item is an Image', async () => {
+    await extension.executeCommand('show-clipboard');
+
+    const { actionService } = await import('../../services/action/actionService.svelte');
+    const ocrAction = vi
+      .mocked(actionService.registerAction)
+      .mock.calls.find((c) => c[0].id === 'clipboard-history:copy-text-from-image')?.[0] as any;
+    expect(ocrAction).toBeDefined();
+    expect(typeof ocrAction.visible).toBe('function');
+
+    const mockState = await import('./state.svelte');
+
+    (mockState.clipboardViewState as any).selectedItem = null;
+    expect(ocrAction.visible()).toBe(false);
+
+    (mockState.clipboardViewState as any).selectedItem = {
+      id: 'txt-1',
+      type: ClipboardItemType.Text,
+      content: 'hello',
+      createdAt: Date.now(),
+      favorite: false,
+    };
+    expect(ocrAction.visible()).toBe(false);
+
+    (mockState.clipboardViewState as any).selectedItem = {
+      id: 'files-1',
+      type: ClipboardItemType.Files,
+      content: '["/a.png"]',
+      createdAt: Date.now(),
+      favorite: false,
+    };
+    expect(ocrAction.visible()).toBe(false);
+
+    (mockState.clipboardViewState as any).selectedItem = {
+      id: 'img-1',
+      type: ClipboardItemType.Image,
+      content: '/app/data/clipboard_cache/img-1.png',
+      createdAt: Date.now(),
+      favorite: false,
+    };
+    expect(ocrAction.visible()).toBe(true);
+  });
+
+  it('execute() calls ocrClipboardItemText with the selected image item id', async () => {
+    await extension.executeCommand('show-clipboard');
+
+    const mockState = await import('./state.svelte');
+    (mockState.clipboardViewState as any).selectedItem = {
+      id: 'img-42',
+      type: ClipboardItemType.Image,
+      content: '/app/data/clipboard_cache/img-42.png',
+      createdAt: Date.now(),
+      favorite: false,
+    };
+
+    const { actionService } = await import('../../services/action/actionService.svelte');
+    const ocrAction = vi
+      .mocked(actionService.registerAction)
+      .mock.calls.find((c) => c[0].id === 'clipboard-history:copy-text-from-image')?.[0];
+    expect(ocrAction).toBeDefined();
+
+    await ocrAction!.execute();
+
+    const { ocrClipboardItemText } = await import('../../lib/ipc/commands');
+    expect(ocrClipboardItemText).toHaveBeenCalledWith('img-42');
+  });
+
+  it('execute() does nothing when selected item is not an Image or is null', async () => {
+    await extension.executeCommand('show-clipboard');
+
+    const { actionService } = await import('../../services/action/actionService.svelte');
+    const ocrAction = vi
+      .mocked(actionService.registerAction)
+      .mock.calls.find((c) => c[0].id === 'clipboard-history:copy-text-from-image')?.[0];
+    expect(ocrAction).toBeDefined();
+
+    const mockState = await import('./state.svelte');
+    (mockState.clipboardViewState as any).selectedItem = null;
+    await ocrAction!.execute();
+
+    (mockState.clipboardViewState as any).selectedItem = {
+      id: 'txt-1',
+      type: ClipboardItemType.Text,
+      content: 'hello',
+      createdAt: Date.now(),
+      favorite: false,
+    };
+    await ocrAction!.execute();
+
+    const { ocrClipboardItemText } = await import('../../lib/ipc/commands');
+    expect(ocrClipboardItemText).not.toHaveBeenCalled();
   });
 });
