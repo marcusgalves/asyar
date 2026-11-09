@@ -7,6 +7,8 @@
     onScrolledToEnd,
     fetchFullItemForId,
     visibleItems,
+    getClipboardItemTitle as getItemTitle,
+    getDerivedClipboardItemTitle,
   } from './state.svelte';
   import { clipboardHistoryStore } from '../../services/clipboard/stores/clipboardHistoryStore.svelte';
   import { fetchRawHtml } from './urlFetcher';
@@ -22,9 +24,12 @@
     EmptyState,
     LauncherListRow,
     Badge,
+    Button,
     Icon,
     IconButton,
+    Input,
     MetadataList,
+    Modal,
   } from '../../components';
   import { searchBarAccessoryService } from '../../services/search/searchBarAccessoryService.svelte';
   import { feedbackService } from '../../services/feedback/feedbackService.svelte';
@@ -392,11 +397,29 @@
     }
   }
 
-  function getItemTitle(item: { type: string; preview?: string }) {
-    const preview = item.preview ?? '';
-    if (!preview)
-      return item.type === 'image' ? 'Image' : item.type === 'files' ? 'Files' : 'Empty';
-    return preview.substring(0, 200).replace(/\n/g, ' ').trim() || 'Empty';
+  let renameValue = $state('');
+  let renamingItem = $derived(clipboardViewState.renamingItem);
+
+  $effect(() => {
+    const target = renamingItem;
+    renameValue = target?.title ?? '';
+  });
+
+  async function handleRenameSubmit() {
+    const target = clipboardViewState.renamingItem;
+    if (!target) return;
+    await clipboardViewState.renameItem(target.id, renameValue);
+  }
+
+  function handleRenameKeydown(e: KeyboardEvent) {
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void handleRenameSubmit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      clipboardViewState.closeRenameDialog();
+    }
   }
 
   function sanitizeHtml(html: string): string {
@@ -1021,6 +1044,47 @@
       {/snippet}
     </SplitListDetail>
   </div>
+
+  <Modal
+    open={Boolean(renamingItem)}
+    maxWidth="380px"
+    onclose={() => clipboardViewState.closeRenameDialog()}
+  >
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="flex flex-col gap-3 p-4" onkeydown={(e) => e.stopPropagation()}>
+      <div class="flex items-center justify-between">
+        <span class="text-md font-medium text-primary">
+          {t('features.clipboard.act.rename')}
+        </span>
+        <IconButton
+          ariaLabel={t('common.cancel')}
+          size="sm"
+          onclick={() => clipboardViewState.closeRenameDialog()}
+        >
+          <Icon name="x" size={14} />
+        </IconButton>
+      </div>
+      <Input
+        bind:value={renameValue}
+        placeholder={renamingItem
+          ? getDerivedClipboardItemTitle(renamingItem)
+          : t('features.clipboard.act.rename_placeholder')}
+        autofocus
+        onkeydown={handleRenameKeydown}
+      />
+      <span class="text-xs text-tertiary">
+        {t('features.clipboard.act.rename_placeholder')}
+      </span>
+      <div class="flex items-center justify-end gap-2">
+        <Button variant="ghost" size="sm" onclick={() => clipboardViewState.closeRenameDialog()}>
+          {t('common.cancel')}
+        </Button>
+        <Button variant="primary" size="sm" onclick={handleRenameSubmit}>
+          {t('common.save')}
+        </Button>
+      </div>
+    </div>
+  </Modal>
 </div>
 
 <style>

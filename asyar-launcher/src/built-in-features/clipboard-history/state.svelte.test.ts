@@ -18,6 +18,7 @@ vi.mock('../../services/clipboard/stores/clipboardHistoryStore.svelte', () => ({
     fetchFullItem: vi.fn().mockResolvedValue(null),
     subscribe: vi.fn(() => () => {}),
     deleteHistoryItem: vi.fn().mockResolvedValue({ imageContentPath: undefined }),
+    renameHistoryItem: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -40,7 +41,11 @@ vi.mock('../../lib/ipc/commands', () => ({
   clipboardGetMergedText: vi.fn().mockResolvedValue({ text: '', skippedCount: 0 }),
 }));
 
-import { ClipboardViewStateClass } from './state.svelte';
+import {
+  ClipboardViewStateClass,
+  getClipboardItemTitle,
+  getDerivedClipboardItemTitle,
+} from './state.svelte';
 import { clipboardHistoryStore } from '../../services/clipboard/stores/clipboardHistoryStore.svelte';
 import * as commands from '../../lib/ipc/commands';
 import { feedbackService } from '../../services/feedback/feedbackService.svelte';
@@ -918,5 +923,77 @@ describe('subscribeToHistoryChanges', () => {
 
     subscriberCallback!({ type: 'upsert', itemId: 'brand-new-item' });
     expect(state.selectedItemId).toBe('item-1');
+  });
+});
+
+describe('getClipboardItemTitle and renameItem', () => {
+  let state: ClipboardViewStateClass;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state = new ClipboardViewStateClass();
+    state.setItems([
+      {
+        id: '1',
+        type: 'text' as any,
+        preview: 'derived preview one',
+        createdAt: 1000,
+        favorite: false,
+      },
+      {
+        id: '2',
+        type: 'image' as any,
+        preview: undefined,
+        createdAt: 2000,
+        favorite: false,
+      },
+    ]);
+  });
+
+  it('prefers non-empty custom title over derived preview and falls back when empty', () => {
+    expect(
+      getClipboardItemTitle({
+        type: 'text',
+        preview: 'derived preview',
+        title: '  My Custom Title  ',
+      }),
+    ).toBe('My Custom Title');
+    expect(
+      getClipboardItemTitle({
+        type: 'text',
+        preview: 'derived preview',
+        title: '   ',
+      }),
+    ).toBe('derived preview');
+    expect(
+      getClipboardItemTitle({
+        type: 'image',
+        preview: undefined,
+        title: undefined,
+      }),
+    ).toBe('Image');
+    expect(getDerivedClipboardItemTitle({ type: 'files' })).toBe('Files');
+  });
+
+  it('opens and closes the rename dialog for the selected item', () => {
+    state.openRenameDialog();
+    expect(state.renamingItem?.id).toBe('1');
+    state.closeRenameDialog();
+    expect(state.renamingItem).toBeNull();
+  });
+
+  it('renames an item, updates state.items, and clears on empty input', async () => {
+    state.openRenameDialog(state.items[0]);
+    const ok = await state.renameItem('1', '  Production Token  ');
+    expect(ok).toBe(true);
+    expect(clipboardHistoryStore.renameHistoryItem).toHaveBeenCalledWith('1', 'Production Token');
+    expect(state.items.find((i) => i.id === '1')?.title).toBe('Production Token');
+    expect(state.renamingItem).toBeNull();
+
+    // Resetting with empty string clears the custom title
+    const okReset = await state.renameItem('1', '   ');
+    expect(okReset).toBe(true);
+    expect(clipboardHistoryStore.renameHistoryItem).toHaveBeenCalledWith('1', null);
+    expect(state.items.find((i) => i.id === '1')?.title).toBeUndefined();
   });
 });

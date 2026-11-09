@@ -413,6 +413,38 @@ class ClipboardHistoryExtension implements Extension {
         searchStores.query = text;
       },
     });
+
+    actionService.registerAction({
+      id: 'clipboard-history:rename',
+      title: t('features.clipboard.act.rename'),
+      description: t('features.clipboard.act.rename_desc'),
+      icon: 'icon:pencil',
+      category: 'clipboard-action',
+      extensionId: 'clipboard-history',
+      context: ActionContext.EXTENSION_VIEW,
+      visible: () => Boolean(clipboardViewState.selectedItem),
+      execute: () => {
+        const selected = clipboardViewState.selectedItem;
+        if (!selected) return;
+        clipboardViewState.openRenameDialog(selected);
+      },
+    });
+
+    actionService.registerAction({
+      id: 'clipboard-history:reset-title',
+      title: t('features.clipboard.act.reset_title'),
+      description: t('features.clipboard.act.reset_title_desc'),
+      icon: 'icon:refresh',
+      category: 'clipboard-action',
+      extensionId: 'clipboard-history',
+      context: ActionContext.EXTENSION_VIEW,
+      visible: () => Boolean(clipboardViewState.selectedItem?.title?.trim()),
+      execute: async () => {
+        const selected = clipboardViewState.selectedItem;
+        if (!selected) return;
+        await clipboardViewState.renameItem(selected.id, null);
+      },
+    });
   }
 
   // Helper method to unregister view-specific actions
@@ -428,6 +460,8 @@ class ClipboardHistoryExtension implements Extension {
     actionService.unregisterAction('clipboard-history:delete');
     actionService.unregisterAction('clipboard-history:clear-multi-selection');
     actionService.unregisterAction('clipboard-history:ask-ai-about-this');
+    actionService.unregisterAction('clipboard-history:rename');
+    actionService.unregisterAction('clipboard-history:reset-title');
   }
 
   // Called when this extension's view is deactivated

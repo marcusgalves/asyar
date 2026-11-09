@@ -14,11 +14,28 @@ import { clipboardHistoryStore } from '../../services/clipboard/stores/clipboard
 import { feedbackService } from '../../services/feedback/feedbackService.svelte';
 import * as commands from '../../lib/ipc/commands';
 
+export function getDerivedClipboardItemTitle(item: { type: string; preview?: string }): string {
+  const preview = item.preview ?? '';
+  if (!preview) return item.type === 'image' ? 'Image' : item.type === 'files' ? 'Files' : 'Empty';
+  return preview.substring(0, 200).replace(/\n/g, ' ').trim() || 'Empty';
+}
+
+export function getClipboardItemTitle(item: {
+  type: string;
+  preview?: string;
+  title?: string;
+}): string {
+  const custom = item.title?.trim();
+  if (custom) return custom;
+  return getDerivedClipboardItemTitle(item);
+}
+
 export class ClipboardViewStateClass {
   searchQuery = $state('');
   lastSearch = $state(Date.now());
   items = $state<ClipboardHistoryItem[]>([]);
   selectedItemId = $state<string | null>(null);
+  renamingItem = $state<ClipboardHistoryItem | null>(null);
   /** Ordered multi-selection (Cmd/Ctrl+Click, Cmd/Ctrl+Arrow) — append-on-add,
    *  independent of the single `selectedItemId` cursor above. Used by
    *  `pasteMergedSelection` to merge-paste in selection order. */
@@ -136,6 +153,7 @@ export class ClipboardViewStateClass {
     this.lastSearch = Date.now();
     this.selectedItemId = null;
     this.selectedIds = [];
+    this.renamingItem = null;
     this.isLoading = true;
     this.loadError = false;
     this.errorMessage = '';
@@ -236,6 +254,44 @@ export class ClipboardViewStateClass {
       return await this.clipboardService.toggleItemFavorite(itemId);
     } catch (error) {
       this.logService?.error(`Error toggling favorite for ${itemId}: ${error}`);
+      return false;
+    }
+  }
+
+  openRenameDialog(item: ClipboardHistoryItem | null = this.selectedItem) {
+    if (!item) return;
+    this.renamingItem = item;
+  }
+
+  closeRenameDialog() {
+    this.renamingItem = null;
+  }
+
+  async renameItem(itemId: string, title: string | null): Promise<boolean> {
+    try {
+      const trimmed = title?.trim() ?? '';
+      const normalized =
+        trimmed.length > 0 ? Array.from(trimmed).slice(0, 200).join('') : undefined;
+      await clipboardHistoryStore.renameHistoryItem(itemId, normalized ?? null);
+      this.items = this.items.map((item) => {
+        if (item.id !== itemId) return item;
+        const copy: ClipboardHistoryItem = { ...item };
+        if (normalized !== undefined) {
+          copy.title = normalized;
+        } else {
+          delete copy.title;
+        }
+        return copy;
+      });
+      if (this.renamingItem?.id === itemId) {
+        this.renamingItem = null;
+      }
+      if (this.searchQuery.trim().length > 0) {
+        await onSearchChanged(this.searchQuery);
+      }
+      return true;
+    } catch (error) {
+      this.logService?.error(`Error renaming item ${itemId}: ${error}`);
       return false;
     }
   }

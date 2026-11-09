@@ -1049,7 +1049,12 @@
         "ask_ai": "就此询问 AI",
         "ask_ai_desc": "打开 AI 聊天并预填此剪贴板文本",
         "clear_history": "清除剪贴板历史",
-        "clear_history_desc": "移除所有非收藏的剪贴板项目"
+        "clear_history_desc": "移除所有非收藏的剪贴板项目",
+        "rename": "重命名",
+        "rename_desc": "为所选剪贴板项目设置自定义标题",
+        "rename_placeholder": "输入自定义标题（留空以恢复默认）",
+        "reset_title": "恢复默认标题",
+        "reset_title_desc": "恢复所选剪贴板项目的默认标题"
       },
       "subtitle": "查看和管理剪贴板历史",
       "unsupported_item": "暂不支持——{type} 类型的剪贴板项目尚无法用于“{action}”。",

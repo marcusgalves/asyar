@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen } from '@testing-library/svelte';
+import { render, cleanup, screen, fireEvent } from '@testing-library/svelte';
 import { tick } from 'svelte';
 
 // Hoisted so the store mock below can list them. The text item comes first so
@@ -51,6 +51,7 @@ vi.mock('../../services/clipboard/stores/clipboardHistoryStore.svelte', () => ({
     subscribe: vi.fn(() => () => {}),
     fetchFullItem: vi.fn((id: string) => Promise.resolve(items[id] ?? null)),
     deleteHistoryItem: vi.fn().mockResolvedValue({ imageContentPath: undefined }),
+    renameHistoryItem: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -218,6 +219,49 @@ describe('DefaultView image preview', () => {
     expect(screen.getByText('text')).toBeTruthy();
     expect(screen.getByText('Characters')).toBeTruthy();
     expect(screen.getByText('5')).toBeTruthy();
+    unmount();
+  });
+
+  it('renders custom title in the list when set and supports rename dialog save/cancel/reset', async () => {
+    clipboardHistoryStore.recent = [
+      {
+        id: 'titled',
+        type: 'text',
+        preview: 'raw preview text',
+        title: 'My API Token',
+        createdAt: 100,
+      } as any,
+    ];
+    const { unmount } = render(DefaultView);
+    await flush();
+
+    // Custom title is rendered in the list instead of raw preview
+    expect(screen.getByText('My API Token')).toBeTruthy();
+
+    // Open rename dialog prefilled with current custom title
+    clipboardViewState.openRenameDialog(clipboardViewState.selectedItem);
+    await flush();
+
+    const input = screen.getByPlaceholderText('raw preview text') as HTMLInputElement;
+    expect(input.value).toBe('My API Token');
+
+    // Type a new title and press Enter to save
+    await fireEvent.input(input, { target: { value: 'Updated Title' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await flush();
+
+    expect(clipboardHistoryStore.renameHistoryItem).toHaveBeenCalledWith('titled', 'Updated Title');
+    expect(clipboardViewState.renamingItem).toBeNull();
+
+    // Re-open, clear to empty string, and save -> resets to null
+    clipboardViewState.openRenameDialog(clipboardViewState.selectedItem);
+    await flush();
+    const input2 = screen.getByPlaceholderText('raw preview text') as HTMLInputElement;
+    await fireEvent.input(input2, { target: { value: '   ' } });
+    await fireEvent.keyDown(input2, { key: 'Enter' });
+    await flush();
+
+    expect(clipboardHistoryStore.renameHistoryItem).toHaveBeenCalledWith('titled', null);
     unmount();
   });
 });

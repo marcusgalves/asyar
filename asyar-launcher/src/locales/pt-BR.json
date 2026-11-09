@@ -1049,7 +1049,12 @@
         "ask_ai": "Perguntar à IA sobre isto",
         "ask_ai_desc": "Abrir o chat de IA com este texto da área de transferência preenchido",
         "clear_history": "Limpar histórico da área de transferência",
-        "clear_history_desc": "Remover todos os itens não favoritos da área de transferência"
+        "clear_history_desc": "Remover todos os itens não favoritos da área de transferência",
+        "rename": "Renomear",
+        "rename_desc": "Definir um título personalizado para o item selecionado da área de transferência",
+        "rename_placeholder": "Digite um título personalizado (deixe vazio para restaurar)",
+        "reset_title": "Restaurar título",
+        "reset_title_desc": "Restaurar o título padrão derivado para o item selecionado da área de transferência"
       },
       "subtitle": "Veja e gerencie o histórico da área de transferência",
       "unsupported_item": "Ainda não suportado — itens de {type} da área de transferência ainda não podem ser usados com \"{action}\".",

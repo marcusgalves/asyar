@@ -1049,7 +1049,12 @@
         "ask_ai": "針對此項目詢問 AI",
         "ask_ai_desc": "開啟 AI 聊天並預填此剪貼簿文字",
         "clear_history": "清除剪貼簿歷史記錄",
-        "clear_history_desc": "移除所有非最愛的剪貼簿項目"
+        "clear_history_desc": "移除所有非最愛的剪貼簿項目",
+        "rename": "重新命名",
+        "rename_desc": "為所選剪貼簿項目設定自訂標題",
+        "rename_placeholder": "輸入自訂標題（留空以恢復預設）",
+        "reset_title": "重設標題",
+        "reset_title_desc": "恢復所選剪貼簿項目的預設標題"
       },
       "subtitle": "檢視與管理剪貼簿歷史",
       "unsupported_item": "尚未支援——{type} 類型的剪貼簿項目尚無法用於「{action}」。",

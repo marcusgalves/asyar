@@ -1049,7 +1049,12 @@
         "ask_ai": "Ask AI about this",
         "ask_ai_desc": "Open AI Chat with this clipboard text pre-filled",
         "clear_history": "Clear Clipboard History",
-        "clear_history_desc": "Remove all non-favorite clipboard items"
+        "clear_history_desc": "Remove all non-favorite clipboard items",
+        "rename": "Rename",
+        "rename_desc": "Set a custom title for the selected clipboard item",
+        "rename_placeholder": "Enter a custom title (leave empty to reset)",
+        "reset_title": "Reset Title",
+        "reset_title_desc": "Restore the default derived title for the selected clipboard item"
       },
       "subtitle": "View and manage your clipboard history",
       "unsupported_item": "Not supported yet — {type} clipboard items can't be used with \"{action}\" yet.",

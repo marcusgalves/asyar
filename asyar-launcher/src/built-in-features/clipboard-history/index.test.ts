@@ -74,6 +74,9 @@ vi.mock('./state.svelte', () => ({
     selectedIds: [] as string[],
     deleteItem: vi.fn().mockResolvedValue(true),
     toggleFavorite: vi.fn().mockResolvedValue(true),
+    openRenameDialog: vi.fn(),
+    closeRenameDialog: vi.fn(),
+    renameItem: vi.fn().mockResolvedValue(true),
     pasteAsPlainText: vi.fn().mockResolvedValue(undefined),
     typeFilter: 'all',
     showRenderedHtml: false,
@@ -1063,5 +1066,62 @@ describe('Ask AI about this action', () => {
     expect(viewManager.goBack).not.toHaveBeenCalled();
     expect(contextModeService.pinHint).not.toHaveBeenCalled();
     expect(searchStores.query).toBe('');
+  });
+
+  it('registers rename and reset-title actions, checks visibility, and unregisters on deactivation', async () => {
+    const mockContext = {
+      getService: vi.fn().mockImplementation((name: string) => {
+        if (name === 'extensions') {
+          return { setActiveViewActionLabel: vi.fn(), navigateToView: vi.fn() };
+        }
+        if (name === 'clipboard') {
+          return { getRecentItems: vi.fn().mockResolvedValue([]) };
+        }
+        return { info: vi.fn(), debug: vi.fn(), error: vi.fn(), warn: vi.fn() };
+      }),
+    };
+    await extension.initialize(mockContext as any);
+    await extension.executeCommand('show-clipboard');
+
+    const { actionService } = await import('../../services/action/actionService.svelte');
+    const renameAction = vi
+      .mocked(actionService.registerAction)
+      .mock.calls.find((c) => c[0].id === 'clipboard-history:rename')?.[0];
+    const resetTitleAction = vi
+      .mocked(actionService.registerAction)
+      .mock.calls.find((c) => c[0].id === 'clipboard-history:reset-title')?.[0];
+
+    expect(renameAction).toBeDefined();
+    expect(resetTitleAction).toBeDefined();
+
+    const mockState = await import('./state.svelte');
+    (mockState.clipboardViewState as any).selectedItem = null;
+    expect((renameAction as any).visible?.()).toBe(false);
+    expect((resetTitleAction as any).visible?.()).toBe(false);
+
+    const untitledItem = {
+      id: 'item-1',
+      type: ClipboardItemType.Text,
+      preview: 'derived preview',
+      createdAt: 1000,
+      favorite: false,
+    };
+    (mockState.clipboardViewState as any).selectedItem = untitledItem;
+    expect((renameAction as any).visible?.()).toBe(true);
+    expect((resetTitleAction as any).visible?.()).toBe(false);
+
+    await renameAction!.execute();
+    expect(mockState.clipboardViewState.openRenameDialog).toHaveBeenCalledWith(untitledItem);
+
+    const titledItem = { ...untitledItem, title: 'Custom Title' };
+    (mockState.clipboardViewState as any).selectedItem = titledItem;
+    expect((resetTitleAction as any).visible?.()).toBe(true);
+
+    await resetTitleAction!.execute();
+    expect(mockState.clipboardViewState.renameItem).toHaveBeenCalledWith('item-1', null);
+
+    await extension.viewDeactivated('clipboard-history/DefaultView');
+    expect(actionService.unregisterAction).toHaveBeenCalledWith('clipboard-history:rename');
+    expect(actionService.unregisterAction).toHaveBeenCalledWith('clipboard-history:reset-title');
   });
 });
